@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1.7
+#
+# Containerised owl-cli build.  Multi-stage:
+#   builder : compile the workspace with cargo-chef caching of deps
+#   runtime : slim debian image carrying just the binary + runtime libs
+#
+# Build:    docker compose --profile cli build owl-cli
+# Run:      docker compose --profile cli run --rm owl-cli chat "hello"
+# Iterate:  pass --build to compose to rebuild after Rust changes.
+
+# ── Builder ─────────────────────────────────────────────────────────────────
+FROM rust:1.83-slim-bookworm AS builder
+
+# System deps for: surrealdb (ssl), git2 (libgit2 + ssl), bollard tls, openssl.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+        ca-certificates \
+        cmake \
+        git \
+        clang \
+    && rm -rf /var/lib/apt/lists/*
+
+# cargo-chef gives us a stable dep-only layer that survives source edits.
+RUN cargo install cargo-chef --locked --version "^0.1"
+
+WORKDIR /build
+
+# Plan recipe from real sources, then compile deps in isolation.
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json -p owl-cli
+
+# Build the actual binary against the cached deps.
+RUN cargo build --release -p owl-cli --bin owl
+
+# ── Runtime ─────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libssl3 \
+        git \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -ms /bin/bash owl
+
+# Bring in shared config defaults.  Env vars passed by compose override.
+COPY --from=builder /build/config /etc/knight-owl/config
+COPY --from=builder /build/target/release/owl /usr/local/bin/owl
+
+# Runtime expects to find config in CWD; symlink to the installed defaults.
+RUN ln -s /etc/knight-owl/config /config
+
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/owl"]
+CMD ["--help"]

@@ -1,0 +1,26 @@
+[package]
+name        = "owl-armory"
+description = "Native tools — every tool implements rig::tool::Tool and NativeTool"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[dependencies]
+owl-protocol = { workspace = true }
+rig-core     = { workspace = true }
+tokio        = { workspace = true }
+async-trait  = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+schemars     = { workspace = true }
+walkdir      = { workspace = true }
+glob         = { workspace = true }
+regex        = { workspace = true }
+uuid         = { workspace = true }
+
+[dev-dependencies]
+owl-harness  = { workspace = true }
+tokio        = { workspace = true, features = ["macros", "rt"] }

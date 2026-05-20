@@ -1,0 +1,22 @@
+[package]
+name        = "owl-protocol"
+description = "Shared types, error enums, and events for the Knight-Owl framework"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+schemars    = { workspace = true }
+async-trait = { workspace = true }
+ts-rs       = { workspace = true, optional = true }
+
+[features]
+default = []
+ipc     = ["dep:ts-rs"]
+
+[dev-dependencies]
+toml = { workspace = true }

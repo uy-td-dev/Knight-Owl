@@ -1,0 +1,8 @@
+# owl-cortex AST ingestor configuration
+# Override with OWL_CORTEX_* env vars.
+
+# Max bytes of source text kept as the preview field on each CodeNode.
+preview_bytes = 200
+
+# Languages to attempt parsing (feature-gated: lang-rust, lang-ts, lang-py).
+langs = ["rust"]

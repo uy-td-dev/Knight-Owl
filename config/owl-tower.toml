@@ -1,0 +1,18 @@
+# owl-tower LLM provider configuration
+# Override with OWL_TOWER_* env vars.
+# Secrets (API keys) must NEVER be stored here — use env vars only.
+
+# Active provider: "anthropic" | "gemini" | "ollama"
+provider = "ollama"
+
+# Model identifier for the active provider.
+# Ollama:    "qwen2.5-coder:7b" (recommended) | "qwen2.5-coder:3b" | "llama3.2"
+# Gemini:    "gemini-2.5-flash"
+# Anthropic: "claude-sonnet-4-6"
+model = "qwen2.5-coder:7b"
+
+# Embedding model (used by owl-vault embedder).  Ollama has no standard
+# embedding endpoint wired here — leave the Gemini default in place, or set
+# `OWL_VAULT_EMBEDDER=hash` to fall back to the local HashEmbedder when no
+# cloud key is set.
+embedding_model = "gemini-embedding-002"

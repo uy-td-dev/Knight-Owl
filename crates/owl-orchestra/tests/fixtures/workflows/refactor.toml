@@ -1,0 +1,29 @@
+schema_version = 1
+
+[identity]
+id          = "refactor"
+name        = "Refactor"
+description = "Plan → research → implement → review a refactor"
+
+[budget]
+timeout_ms       = 300000
+max_total_tokens = 80000
+on_failure       = "abort"
+
+[[steps]]
+id     = "plan"
+agent  = "researcher"
+prompt = "User request: {{user_input}}\nIdentify impacted files."
+
+[[steps]]
+id      = "code"
+agent   = "coder"
+depends = ["plan"]
+prompt  = "Plan: {{plan.output}}\nImplement."
+on_failure = "retry_once"
+
+[[steps]]
+id      = "verify"
+agent   = "reviewer"
+depends = ["code"]
+prompt  = "Verify {{code.output}} via cargo check."

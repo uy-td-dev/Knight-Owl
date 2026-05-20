@@ -1,0 +1,65 @@
+[workspace]
+members = [
+    "shared/owl-protocol",
+    "crates/owl-brain",
+    "crates/owl-tower",
+    "crates/owl-armory",
+    "crates/owl-mcp",
+    "crates/owl-vault",
+    "crates/owl-cartographer",
+    "crates/owl-cortex",
+    "crates/owl-harness",
+    "crates/owl-orchestra",
+    "crates/owl-sandbox",
+    "apps/owl-cli",
+    "apps/owl-desktop/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+authors      = ["Knight-Owl Contributors"]
+license      = "MIT"
+rust-version = "1.78"
+
+[workspace.dependencies]
+# Shared internal crates
+owl-protocol = { path = "shared/owl-protocol" }
+owl-brain    = { path = "crates/owl-brain" }
+owl-tower    = { path = "crates/owl-tower" }
+owl-armory   = { path = "crates/owl-armory" }
+owl-mcp      = { path = "crates/owl-mcp" }
+owl-vault    = { path = "crates/owl-vault" }
+owl-cartographer = { path = "crates/owl-cartographer" }
+owl-cortex   = { path = "crates/owl-cortex" }
+owl-harness  = { path = "crates/owl-harness" }
+owl-orchestra = { path = "crates/owl-orchestra" }
+owl-sandbox  = { path = "crates/owl-sandbox" }
+
+# Core
+rig-core     = { version = "0.36" }
+tokio        = { version = "1", features = ["full"] }
+async-trait  = "0.1"
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+thiserror    = "2"
+anyhow       = "1"
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+schemars     = { version = "0.8", features = ["derive"] }
+ts-rs        = { version = "10" }
+surrealdb    = { version = "3", features = ["kv-mem", "kv-rocksdb"] }
+petgraph     = { version = "0.6" }
+uuid         = { version = "1", features = ["v4", "serde"] }
+bollard      = { version = "0.17" }
+lsp-types    = { version = "0.95" }
+futures-util = { version = "0.3" }
+reqwest      = { version = "0.12", features = ["json", "stream"] }
+walkdir      = { version = "2" }
+glob         = { version = "0.3" }
+regex        = { version = "1" }
+git2         = { version = "0.19", default-features = false }
+toml         = { version = "0.8" }
+notify       = { version = "6" }
+tokio-util   = { version = "0.7", features = ["rt"] }

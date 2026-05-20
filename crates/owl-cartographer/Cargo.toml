@@ -1,0 +1,23 @@
+[package]
+name        = "owl-cartographer"
+description = "GraphRAG — entity/relation extraction and knowledge-graph reasoning"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[dependencies]
+owl-protocol = { workspace = true }
+owl-vault    = { workspace = true }
+rig-core     = { workspace = true }
+tokio        = { workspace = true }
+async-trait  = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+
+[dev-dependencies]
+owl-harness  = { workspace = true }
+tokio        = { workspace = true }

@@ -1,0 +1,24 @@
+[package]
+name        = "owl-orchestra"
+description = "The Conductor — agent / skill / workflow / command registry and execution engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+owl-protocol = { workspace = true }
+
+# Async / typed errors
+owl-brain    = { workspace = true }
+async-trait  = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+tracing      = { workspace = true }
+
+# Spec parsing
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+toml         = { workspace = true }
+notify       = { workspace = true }

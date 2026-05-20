@@ -1,0 +1,27 @@
+{
+  "_comment": "Copy to ~/.knight-owl/settings.json and fill in. Every field is optional — leave null/missing to use defaults or shell env. Existing env vars ALWAYS win over this file.",
+
+  "provider":     "ollama",
+  "model":        "qwen2.5-coder:7b",
+  "cache_policy": "ephemeral",
+
+  "anthropic_api_key": null,
+  "gemini_api_key":    null,
+
+  "gemini_model":           "gemini-2.5-flash",
+  "gemini_embedding_model": "gemini-embedding-002",
+
+  "ollama_base_url":    "http://localhost:11434",
+  "ollama_embed_model": "nomic-embed-text",
+
+  "surreal_endpoint":  "ws://localhost:8000",
+  "surreal_namespace": "knight_owl",
+  "surreal_database":  "vault",
+  "surreal_username":  "root",
+  "surreal_password":  "root",
+
+  "brain_max_steps":             10,
+  "brain_memory_context_limit":  15,
+
+  "sandbox_bash_enabled": true
+}

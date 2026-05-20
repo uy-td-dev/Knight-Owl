@@ -1,0 +1,23 @@
+[package]
+name        = "owl-sandbox"
+description = "Isolated execution sandbox — Docker-backed code verification for Knight-Owl"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[features]
+default = ["docker"]
+docker  = ["dep:bollard", "dep:futures-util"]
+
+[dependencies]
+owl-protocol = { workspace = true }
+tokio        = { workspace = true }
+async-trait  = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+
+bollard      = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }

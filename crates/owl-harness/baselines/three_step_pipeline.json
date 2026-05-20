@@ -1,0 +1,147 @@
+{
+  "name": "three_step_pipeline",
+  "events": [
+    {
+      "type": "workflow_started",
+      "trace_id": "baseline-trace",
+      "workflow": "baseline"
+    },
+    {
+      "type": "step_started",
+      "trace_id": "baseline-trace",
+      "step": "plan",
+      "agent": "researcher",
+      "prompt": "plan: extract Foo"
+    },
+    {
+      "type": "step_completed",
+      "trace_id": "baseline-trace",
+      "step": "plan",
+      "result": {
+        "step_id": "plan",
+        "agent": "researcher",
+        "status": "completed",
+        "output": "[researcher] plan: extract Foo",
+        "error": null,
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "started_at": 0,
+        "finished_at": 0,
+        "attempts": 1
+      }
+    },
+    {
+      "type": "step_started",
+      "trace_id": "baseline-trace",
+      "step": "code",
+      "agent": "coder",
+      "prompt": "code from [researcher] plan: extract Foo"
+    },
+    {
+      "type": "step_completed",
+      "trace_id": "baseline-trace",
+      "step": "code",
+      "result": {
+        "step_id": "code",
+        "agent": "coder",
+        "status": "completed",
+        "output": "[coder] code from [researcher] plan: extract Foo",
+        "error": null,
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "started_at": 0,
+        "finished_at": 0,
+        "attempts": 1
+      }
+    },
+    {
+      "type": "step_started",
+      "trace_id": "baseline-trace",
+      "step": "verify",
+      "agent": "reviewer",
+      "prompt": "verify [coder] code from [researcher] plan: extract Foo"
+    },
+    {
+      "type": "step_completed",
+      "trace_id": "baseline-trace",
+      "step": "verify",
+      "result": {
+        "step_id": "verify",
+        "agent": "reviewer",
+        "status": "completed",
+        "output": "[reviewer] verify [coder] code from [researcher] plan: extract Foo",
+        "error": null,
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "started_at": 0,
+        "finished_at": 0,
+        "attempts": 1
+      }
+    },
+    {
+      "type": "workflow_completed",
+      "outcome": {
+        "trace_id": "baseline-trace",
+        "workflow_id": "baseline",
+        "final_text": "[reviewer] verify [coder] code from [researcher] plan: extract Foo",
+        "step_results": [
+          {
+            "step_id": "plan",
+            "agent": "researcher",
+            "status": "completed",
+            "output": "[researcher] plan: extract Foo",
+            "error": null,
+            "tokens": {
+              "input_tokens": 0,
+              "output_tokens": 0
+            },
+            "started_at": 0,
+            "finished_at": 0,
+            "attempts": 1
+          },
+          {
+            "step_id": "code",
+            "agent": "coder",
+            "status": "completed",
+            "output": "[coder] code from [researcher] plan: extract Foo",
+            "error": null,
+            "tokens": {
+              "input_tokens": 0,
+              "output_tokens": 0
+            },
+            "started_at": 0,
+            "finished_at": 0,
+            "attempts": 1
+          },
+          {
+            "step_id": "verify",
+            "agent": "reviewer",
+            "status": "completed",
+            "output": "[reviewer] verify [coder] code from [researcher] plan: extract Foo",
+            "error": null,
+            "tokens": {
+              "input_tokens": 0,
+              "output_tokens": 0
+            },
+            "started_at": 0,
+            "finished_at": 0,
+            "attempts": 1
+          }
+        ],
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "started_at": 0,
+        "finished_at": 0,
+        "success": true
+      }
+    }
+  ]
+}

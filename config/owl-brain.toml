@@ -1,0 +1,8 @@
+# owl-brain runtime configuration
+# Override with OWL_BRAIN_* env vars.
+
+# Maximum tool-call iterations per request before giving up.
+max_steps = 10
+
+# Number of memory entries passed to the LLM in each planning step.
+memory_context_limit = 20

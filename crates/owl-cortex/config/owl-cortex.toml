@@ -1,0 +1,10 @@
+# owl-cortex configuration
+# All tunables — override fields with OWL_CORTEX_* env vars.
+
+# Maximum bytes of source text to store as preview per code_node.
+# Env: OWL_CORTEX_PREVIEW_BYTES
+preview_bytes = 200
+
+# Languages enabled for AST parsing. Valid values: "rust", "typescript", "python".
+# Env: OWL_CORTEX_LANGS (comma-separated)
+langs = ["rust"]

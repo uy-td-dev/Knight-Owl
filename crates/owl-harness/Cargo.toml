@@ -1,0 +1,21 @@
+[package]
+name        = "owl-harness"
+description = "Test mocks and evaluator — dev-dependency only, never in production deps"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+# owl-harness is ONLY used as a dev-dependency by other crates.
+[dependencies]
+owl-protocol  = { workspace = true }
+owl-brain     = { workspace = true }
+owl-armory    = { workspace = true }
+owl-orchestra = { workspace = true }
+rig-core      = { workspace = true }
+tokio         = { workspace = true }
+tokio-util    = { workspace = true }
+async-trait   = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }

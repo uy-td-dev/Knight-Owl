@@ -1,0 +1,6 @@
+# owl-vault SurrealDB configuration
+# Override with OWL_VAULT_* env vars.
+
+endpoint  = "ws://localhost:8000"
+namespace = "knight_owl"
+database  = "vault"

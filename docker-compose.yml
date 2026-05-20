@@ -1,0 +1,133 @@
+# Knight-Owl development stack.
+#
+# Services:
+#   - surrealdb : 4-layer knowledge graph + memory store (mandatory for persistence)
+#   - ollama    : local LLM runner (optional — only when using Ollama provider)
+#   - owl-cli   : containerised CLI for headless / CI usage  (profile: cli)
+#
+# Usage:
+#   docker compose up -d surrealdb              # baseline (SurrealDB only)
+#   docker compose --profile ollama up -d       # + local LLM
+#   docker compose --profile cli run owl-cli chat "hello"
+#
+# Desktop app (Tauri) is NOT containerised — GUI apps need a host window
+# manager.  Run it from the host via `cargo tauri dev` while the stack is up.
+#
+# Sandbox note: `owl-sandbox` (bollard) calls the host Docker daemon to run
+# isolated bash tasks — that runs OUTSIDE this compose, on the host socket.
+
+name: knight-owl
+
+services:
+  # ── SurrealDB ───────────────────────────────────────────────────────────
+  # 4-layer knowledge graph (L1 syntax / L2 logic / L3 semantic / L4 experience)
+  # plus persistent agent memory.  Default port 8000 (WebSocket + HTTP).
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    container_name: knight-owl-surreal
+    restart: unless-stopped
+    # Recent surrealdb images run as a non-root user; Docker volumes default
+    # to root ownership which causes RocksDB to fail with `PermissionDenied`
+    # on first write.  Pin to root for dev — for prod, mount a pre-chown'd
+    # host path instead.
+    user: "0:0"
+    command:
+      - start
+      - --user=${OWL_VAULT_USERNAME:-root}
+      - --pass=${OWL_VAULT_PASSWORD:-root}
+      - --bind=0.0.0.0:8000
+      - rocksdb:/data/knight-owl.db
+    ports:
+      - "${OWL_VAULT_PORT:-8000}:8000"
+    volumes:
+      - surreal-data:/data
+    healthcheck:
+      test: ["CMD", "/surreal", "is-ready", "--endpoint", "http://localhost:8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # ── Ollama (optional — local LLM) ───────────────────────────────────────
+  # Activate with:  docker compose --profile ollama up -d
+  # Pull a model after first start:
+  #   docker compose exec ollama ollama pull llama3.2
+  #   docker compose exec ollama ollama pull qwen2.5-coder
+  # GPU: uncomment the `deploy` block on a host with NVIDIA + nvidia-container-toolkit.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: knight-owl-ollama
+    restart: unless-stopped
+    profiles: ["ollama"]
+    ports:
+      - "${OWL_OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ── owl-cli (optional — containerised CLI) ──────────────────────────────
+  # Activate with:  docker compose --profile cli run --rm owl-cli chat "hello"
+  # Build context is the workspace root; binary is compiled inside the image
+  # so iterating Rust code requires `--build` to refresh.
+  owl-cli:
+    build:
+      context: .
+      dockerfile: Dockerfile.cli
+    image: knight-owl/owl-cli:latest
+    profiles: ["cli"]
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    environment:
+      # Cloud providers (set only the one you use).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY:    ${GEMINI_API_KEY:-}
+
+      # Tower selection.  Default: claude (auto-falls-back to gemini/ollama
+      # if its key is missing — see apps/owl-desktop/src-tauri/src/state.rs).
+      OWL_TOWER_PROVIDER: ${OWL_TOWER_PROVIDER:-anthropic}
+      OWL_TOWER_MODEL:    ${OWL_TOWER_MODEL:-claude-sonnet-4-6}
+      OWL_TOWER_CACHE_POLICY: ${OWL_TOWER_CACHE_POLICY:-ephemeral}
+
+      # Vault — point at the surrealdb service via Docker DNS.
+      OWL_VAULT_ENDPOINT: ws://surrealdb:8000
+      OWL_VAULT_USERNAME: ${OWL_VAULT_USERNAME:-root}
+      OWL_VAULT_PASSWORD: ${OWL_VAULT_PASSWORD:-root}
+      OWL_VAULT_DATABASE: ${OWL_VAULT_DATABASE:-vault}
+
+      # Ollama — only used when provider=ollama.  When `ollama` profile is
+      # active, `ollama` resolves to its Docker DNS name on the same network.
+      OWL_OLLAMA_BASE_URL: ${OWL_OLLAMA_BASE_URL:-http://ollama:11434}
+      OWL_OLLAMA_MODEL:    ${OWL_OLLAMA_MODEL:-llama3.2}
+
+      # Brain
+      OWL_BRAIN_MAX_STEPS:           ${OWL_BRAIN_MAX_STEPS:-10}
+      OWL_BRAIN_MEMORY_CONTEXT_LIMIT: ${OWL_BRAIN_MEMORY_CONTEXT_LIMIT:-20}
+
+      # Sandbox: keep enabled.  Inside the container, "host bash" IS the
+      # container's own /bin/sh — already isolated from the host FS.
+      OWL_SANDBOX_BASH: "1"
+
+      # The CLI operates on this directory; mount your project below.
+      OWL_WORKSPACE: /workspace
+    volumes:
+      # Read-write so the agent can edit files (gated by approval policy).
+      - ${OWL_WORKSPACE:-./}:/workspace
+      # Persist `~/.knight-owl/` (chat history, conversations, MCP configs).
+      - knight-owl-home:/root/.knight-owl
+    working_dir: /workspace
+
+volumes:
+  surreal-data:
+  ollama-data:
+  knight-owl-home:
+
+networks:
+  default:
+    name: knight-owl

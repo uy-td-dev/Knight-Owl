@@ -1,0 +1,23 @@
+[package]
+name        = "owl-vault"
+description = "Hybrid graph+vector store — SurrealDB-backed semantic memory for Knight-Owl"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[dependencies]
+owl-protocol = { workspace = true }
+rig-core     = { workspace = true }
+surrealdb    = { workspace = true }
+tokio        = { workspace = true }
+async-trait  = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+toml         = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -1,0 +1,37 @@
+[package]
+name        = "owl-cli"
+description = "Fast, scriptable CLI for Knight-Owl"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[[bin]]
+name = "owl"
+path = "src/main.rs"
+
+[features]
+default = ["gemini"]
+gemini  = ["owl-tower/gemini"]
+
+[dependencies]
+owl-brain    = { workspace = true }
+owl-protocol = { workspace = true }
+owl-tower    = { workspace = true }
+owl-armory   = { workspace = true }
+owl-vault    = { workspace = true }
+owl-cortex   = { workspace = true }
+owl-sandbox  = { workspace = true }
+anyhow       = { workspace = true }
+surrealdb    = { workspace = true }
+uuid         = { workspace = true }
+walkdir      = "2"
+notify       = { version = "6", features = ["macos_fsevent"] }
+async-trait  = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap         = { version = "4", features = ["derive"] }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+git2         = { workspace = true }

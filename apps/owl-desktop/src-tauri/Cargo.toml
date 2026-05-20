@@ -1,0 +1,50 @@
+[package]
+name        = "owl-desktop"
+description = "Knight-Owl desktop application (Tauri v2)"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[[bin]]
+name  = "owl-desktop"
+path  = "src/main.rs"
+
+[lib]
+name = "owl_desktop_lib"
+path = "src/lib.rs"
+
+[features]
+default = ["gemini", "ollama"]
+gemini  = ["owl-tower/gemini"]
+ollama  = ["owl-tower/ollama"]
+
+[build-dependencies]
+tauri-build  = { version = "2", features = [] }
+
+[dependencies]
+owl-brain    = { workspace = true }
+owl-mcp      = { workspace = true }
+owl-protocol = { workspace = true, features = ["ipc"] }
+owl-tower    = { workspace = true }
+owl-armory   = { workspace = true }
+owl-vault    = { workspace = true }
+owl-cortex   = { workspace = true }
+owl-cartographer = { workspace = true }
+owl-orchestra = { workspace = true }
+owl-sandbox  = { workspace = true }
+rig-core     = { workspace = true }
+anyhow       = { workspace = true }
+async-trait  = { workspace = true }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+uuid         = { workspace = true }
+tauri        = { version = "2", features = [] }
+tauri-plugin-dialog = { version = "2" }
+reqwest      = { workspace = true }
+futures-util = { workspace = true }
+walkdir      = { workspace = true }

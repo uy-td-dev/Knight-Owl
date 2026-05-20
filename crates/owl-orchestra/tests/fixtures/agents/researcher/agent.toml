@@ -1,0 +1,21 @@
+schema_version = 1
+
+[identity]
+id          = "researcher"
+name        = "Researcher"
+description = "Read-only code locator and explainer"
+
+[model]
+provider  = "inherit"
+id        = "gemini-2.5-flash"
+max_steps = 10
+
+[capabilities]
+can_spawn      = false
+allowed_tools  = ["read_file", "glob", "grep", "list_dir"]
+skills         = ["grep_callsites"]
+
+[budget]
+max_input_tokens  = 50000
+max_output_tokens = 8000
+max_depth         = 0
