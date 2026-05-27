@@ -6,6 +6,8 @@ use tracing_subscriber::EnvFilter;
 
 mod commands;
 mod context;
+mod memory;
+mod slash;
 mod tools;
 
 use commands::Cli;

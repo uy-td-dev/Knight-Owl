@@ -1,0 +1,21 @@
+[package]
+name        = "owl-scheduler"
+description = "Cron-driven autonomous task runner — Hermes-style scheduled agent invocations"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+owl-protocol = { workspace = true }
+owl-brain    = { workspace = true }
+
+async-trait  = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+uuid         = { workspace = true }
+cron         = { workspace = true }
+chrono       = { workspace = true }

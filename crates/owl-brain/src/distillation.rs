@@ -16,9 +16,13 @@ use owl_protocol::experience::{
     ExperienceStore, Insight, InsightKind, TaskMemory, TaskOutcome,
 };
 
+use crate::skill_writer::{SkillDraft, SkillWriter};
 use crate::BrainError;
 
 const MIN_CLUSTER_SIZE: usize = 3;
+/// A cluster needs at least this many SUCCESSFUL tasks to mint a reusable
+/// skill — fewer than that and we're just memorising noise.
+const SKILL_CLUSTER_SIZE: usize = 5;
 
 pub struct DistillationWorker<M>
 where
@@ -26,6 +30,7 @@ where
 {
     model: M,
     experience: Arc<dyn ExperienceStore>,
+    skill_writer: Option<Arc<dyn SkillWriter>>,
 }
 
 impl<M> DistillationWorker<M>
@@ -33,7 +38,15 @@ where
     M: rig::completion::CompletionModel + Clone + Send + Sync + 'static,
 {
     pub fn new(model: M, experience: Arc<dyn ExperienceStore>) -> Self {
-        Self { model, experience }
+        Self { model, experience, skill_writer: None }
+    }
+
+    /// Attach a skill writer so high-success clusters are crystallised
+    /// into reusable `.knight-owl/skills/<id>.md` files (Hermes-style
+    /// procedural memory).  Without one, only `Insight`s are emitted.
+    pub fn with_skill_writer(mut self, writer: Arc<dyn SkillWriter>) -> Self {
+        self.skill_writer = Some(writer);
+        self
     }
 
     pub async fn run_once(&self, batch_size: u64) -> Result<usize, BrainError> {
@@ -50,6 +63,7 @@ where
 
         let clusters = cluster_by_request(&memories);
         let mut insights_created = 0usize;
+        let mut skills_created   = 0usize;
 
         for cluster in clusters {
             if cluster.len() < MIN_CLUSTER_SIZE {
@@ -77,10 +91,61 @@ where
                     warn!(err = %e, "distillation failed for cluster");
                 }
             }
+
+            // ── Procedural-memory leg ────────────────────────────────────
+            // If this cluster is a recurring SUCCESS (≥ SKILL_CLUSTER_SIZE
+            // successful runs), mint a reusable skill from it.
+            let successes: Vec<&TaskMemory> = cluster
+                .iter()
+                .copied()
+                .filter(|m| matches!(m.outcome, TaskOutcome::Success))
+                .collect();
+            if successes.len() >= SKILL_CLUSTER_SIZE {
+                if let Some(writer) = self.skill_writer.as_ref() {
+                    match self.distill_skill(&successes).await {
+                        Ok(draft) => {
+                            match writer.write_skill(draft).await {
+                                Ok(id) => {
+                                    info!(skill_id = %id, "skill written");
+                                    skills_created += 1;
+                                }
+                                Err(e) => warn!(err = %e, "skill write failed"),
+                            }
+                        }
+                        Err(e) => warn!(err = %e, "skill distillation failed for cluster"),
+                    }
+                }
+            }
         }
 
-        info!(insights_created, "distillation complete");
-        Ok(insights_created)
+        info!(insights_created, skills_created, "distillation complete");
+        Ok(insights_created + skills_created)
+    }
+
+    /// Distill a success-cluster into a [`SkillDraft`] via the LLM.
+    async fn distill_skill(
+        &self,
+        cluster: &[&TaskMemory],
+    ) -> Result<SkillDraft, BrainError> {
+        let prompt_text = format_skill_prompt(cluster);
+        let agent = AgentBuilder::new(self.model.clone())
+            .preamble(crate::prompt::SKILL_DISTILLATION_SYSTEM)
+            .build();
+        let raw = agent
+            .prompt(prompt_text.as_str())
+            .await
+            .map_err(|e| BrainError::Completion(e.to_string()))?;
+        let parsed = parse_skill_response(&raw)?;
+        // Suggest a stable id — writer is free to dedupe.
+        let id = format!("auto-{}", uuid::Uuid::new_v4().simple());
+        Ok(SkillDraft {
+            id,
+            name:              parsed.name,
+            description:       parsed.description,
+            trigger:           parsed.trigger,
+            recommended_tools: parsed.recommended_tools,
+            body:              parsed.body,
+        })
     }
 
     async fn distill_cluster(&self, cluster: &[&TaskMemory]) -> Result<ParsedInsight, BrainError> {
@@ -144,6 +209,61 @@ fn parse_insight_response(raw: &str) -> Result<ParsedInsight, BrainError> {
         }
     }
     serde_json::from_str::<ParsedInsight>(&raw[start..end]).map_err(Into::into)
+}
+
+#[derive(serde::Deserialize)]
+struct ParsedSkill {
+    name:        String,
+    description: String,
+    #[serde(default)]
+    trigger:     Option<String>,
+    #[serde(default)]
+    recommended_tools: Vec<String>,
+    body:        String,
+}
+
+fn format_skill_prompt(cluster: &[&TaskMemory]) -> String {
+    let mut parts = Vec::new();
+    for (i, m) in cluster.iter().enumerate() {
+        parts.push(format!(
+            "Task {}: request=\"{}\" actions=[{}]",
+            i + 1,
+            m.request,
+            m.actions.join(", "),
+        ));
+    }
+    parts.push(
+        "\nDistill ONE skill these tasks share. Respond with the JSON object only.".into(),
+    );
+    parts.join("\n")
+}
+
+fn parse_skill_response(raw: &str) -> Result<ParsedSkill, BrainError> {
+    let start = raw.find('{').ok_or_else(|| {
+        BrainError::Completion("no JSON object in skill response".into())
+    })?;
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut end = start;
+    for (i, ch) in raw[start..].char_indices() {
+        if escape { escape = false; continue; }
+        if ch == '\\' && in_string { escape = true; continue; }
+        if ch == '"' { in_string = !in_string; continue; }
+        if in_string { continue; }
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    serde_json::from_str::<ParsedSkill>(&raw[start..end]).map_err(Into::into)
 }
 
 fn cluster_by_request<'a>(memories: &'a [TaskMemory]) -> Vec<Vec<&'a TaskMemory>> {
@@ -218,6 +338,8 @@ mod tests {
             outcome: TaskOutcome::Success,
             code_refs: vec![],
             session_id: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
         }
     }
 }

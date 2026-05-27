@@ -10,19 +10,25 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use rig::agent::AgentBuilder;
 use rig::agent::MultiTurnStreamItem;
+use rig::completion::Usage;
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use tracing::{debug, info, warn};
 
+use owl_protocol::code::Severity;
 use owl_protocol::events::AgentEvent;
-use owl_protocol::experience::{ExperienceStore, InsightKind, TaskMemory, TaskOutcome};
+use owl_protocol::experience::{ExperienceStore, InsightKind, TaskMemory, TaskOutcome, TestRun};
+use owl_protocol::sandbox::{ExecutionPlan, Sandbox};
 use owl_protocol::state::AgentState;
 use owl_protocol::tools::{ToolCall, ToolResult};
 
+use crate::compactor::Compactor;
 use crate::context::ContextProvider;
 use crate::distillation::DistillationWorker;
 use crate::event_sink::{EventSink, NullSink};
 use crate::memory::{MemoryEntry, MemoryStore};
+use crate::reviewer::Reviewer;
 use crate::runner::AgentRunner;
+use crate::skill_writer::SkillWriter;
 use crate::BrainError;
 
 /// Background distillation fires every N completed tasks.
@@ -44,6 +50,24 @@ pub struct ReasoningConfig {
     pub model_class: crate::ModelClass,
     /// Max bytes of tool stdout/stderr forwarded back to the model.
     pub tool_result_max_bytes: usize,
+    /// R-21 — how many times to re-enter Plan after a failed sandbox verify
+    /// before surfacing the failure to the user.  Set to 0 to disable retry.
+    pub verify_retries: usize,
+    /// R-22 — how many times to re-enter Plan after Block-severity violations
+    /// before giving up.  Set to 0 to disable retry (still records violations).
+    pub review_retries: usize,
+    /// Absolute path mounted into the sandbox at `/workspace`.
+    ///
+    /// `None` disables verification entirely — the loop returns the model's
+    /// final text without ever calling `Sandbox::run`.  Required when a
+    /// sandbox is wired via [`ReasoningLoop::with_sandbox`].
+    pub workspace_path: Option<String>,
+    /// When memory grows above this many entries, the reflection block
+    /// triggers compaction (if a [`Compactor`] is wired).  `0` disables.
+    pub compact_threshold: usize,
+    /// Number of most-recent entries to preserve verbatim during
+    /// compaction.  Everything older is summarised into one entry.
+    pub compact_keep_recent: usize,
 }
 
 impl Default for ReasoningConfig {
@@ -64,6 +88,11 @@ impl ReasoningConfig {
             system_prompt:         crate::prompt::system_for(class).to_string(),
             model_class:           class,
             tool_result_max_bytes: class.tool_result_max_bytes(),
+            verify_retries:        2,
+            review_retries:        2,
+            workspace_path:        None,
+            compact_threshold:     80,
+            compact_keep_recent:   20,
         }
     }
 
@@ -98,6 +127,10 @@ where
     context: Option<Arc<dyn ContextProvider>>,
     experience: Option<Arc<dyn ExperienceStore>>,
     event_sink: Arc<dyn EventSink>,
+    sandbox: Option<Arc<dyn Sandbox>>,
+    reviewer: Option<Arc<dyn Reviewer>>,
+    skill_writer: Option<Arc<dyn SkillWriter>>,
+    compactor: Option<Arc<dyn Compactor>>,
     config: ReasoningConfig,
 }
 
@@ -119,6 +152,10 @@ where
             model, tools, memory,
             context: None, experience: None,
             event_sink: Arc::new(NullSink),
+            sandbox: None,
+            reviewer: None,
+            skill_writer: None,
+            compactor: None,
             config,
         }
     }
@@ -143,6 +180,38 @@ where
         self
     }
 
+    /// Attach a sandbox backend to enable R-21 verify-after-edit.
+    ///
+    /// Requires [`ReasoningConfig::workspace_path`] to be `Some` — without
+    /// a workspace path the sandbox has nothing to mount and verification
+    /// silently skips.
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
+
+    /// Attach a reviewer to enable R-22 standard-violation gating after
+    /// every successful sandbox verification.  Without one, the loop never
+    /// queries `standard_node`s — every cargo-check pass converges as Idle.
+    pub fn with_reviewer(mut self, reviewer: Arc<dyn Reviewer>) -> Self {
+        self.reviewer = Some(reviewer);
+        self
+    }
+
+    /// Attach a skill writer so background distillation can mint reusable
+    /// `.knight-owl/skills/<id>.md` files from success clusters.
+    pub fn with_skill_writer(mut self, writer: Arc<dyn SkillWriter>) -> Self {
+        self.skill_writer = Some(writer);
+        self
+    }
+
+    /// Attach a compactor so the reflection block can shrink memory when
+    /// it exceeds [`ReasoningConfig::compact_threshold`].
+    pub fn with_compactor(mut self, compactor: Arc<dyn Compactor>) -> Self {
+        self.compactor = Some(compactor);
+        self
+    }
+
     /// Run the reasoning loop for the given prompt, returning the final answer.
     pub async fn run(&self, prompt: &str) -> Result<String, BrainError> {
         self.memory
@@ -153,6 +222,17 @@ where
             .preamble(&self.config.system_prompt)
             .build();
 
+        // R-21: each task gets one stable id so every TestRun row written
+        // during this `run()` invocation links back to the same TaskMemory.
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let mut overall_action_log: Vec<String> = Vec::new();
+        let mut verify_attempts: usize = 0;
+        let mut review_attempts: usize = 0;
+        // Phase F — token + cost tracking.  Accumulated across every stream
+        // call in this task.  Reported to L4 via TaskMemory in reflection.
+        let mut total_usage = Usage::new();
+
+        let result: Result<String, BrainError> = 'verify: loop {
         let mut state = AgentState::Idle;
         let mut steps = 0;
         let mut action_log: Vec<String> = Vec::new();
@@ -161,7 +241,7 @@ where
         // instead of synthesising the result (common in small models).
         let mut dispatched: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        let result = loop {
+        let inner_result: Result<String, BrainError> = loop {
             if steps >= self.config.max_steps {
                 break Err(BrainError::MaxStepsExceeded(self.config.max_steps));
             }
@@ -197,9 +277,12 @@ where
                                     .await;
                                 response.push_str(&t.text);
                             }
-                            MultiTurnStreamItem::FinalResponse(_) => {
+                            MultiTurnStreamItem::FinalResponse(ref resp) => {
                                 // Final aggregated response — text already
-                                // accumulated chunk-by-chunk above.
+                                // accumulated chunk-by-chunk above.  Capture
+                                // the provider's token usage (may be zero
+                                // for backends that don't report it).
+                                total_usage = total_usage + resp.usage();
                             }
                             // Other variants (tool-call deltas, user items) are
                             // intentionally ignored: the loop's existing parser
@@ -331,10 +414,153 @@ where
                     break Ok(final_text);
                 }
 
-                AgentState::Acting | AgentState::Observing | AgentState::Idle => {
+                AgentState::Acting | AgentState::Observing | AgentState::Idle | AgentState::Reviewing => {
                     steps += 1;
                 }
             }
+        };
+
+        overall_action_log.extend(action_log.iter().cloned());
+
+        // ── R-21 Verification gate ────────────────────────────────────────
+        // Forward inner errors verbatim; only successes are subject to
+        // sandbox verification.
+        let text = match inner_result {
+            Err(e) => break 'verify Err(e),
+            Ok(t)  => t,
+        };
+
+        // Skip verification when sandbox / workspace / mutating action is
+        // missing — return the model's text as-is.
+        let sandbox = match self.sandbox.as_ref() {
+            Some(s) => s,
+            None    => break 'verify Ok(text),
+        };
+        let ws = match self.config.workspace_path.as_ref() {
+            Some(p) => p,
+            None    => break 'verify Ok(text),
+        };
+        // Verify if ANY attempt in this task touched a mutating tool —
+        // previous attempts' edits are still on disk, so we cannot trust
+        // a "done" reply from a later attempt that didn't itself edit.
+        if !overall_action_log.iter().any(|a| is_mutating_action(a)) {
+            break 'verify Ok(text);
+        }
+
+        // Run cargo check inside the sandbox and persist the outcome.
+        let plan = ExecutionPlan::cargo_check(ws.clone(), task_id.clone());
+        let started_ms = now_ms();
+        let outcome = match sandbox.run(plan).await {
+            Ok(o)  => o,
+            Err(e) => {
+                warn!(err = %e, "sandbox.run failed; skipping verification");
+                break 'verify Ok(text);
+            }
+        };
+
+        if let Some(exp) = &self.experience {
+            let run = TestRun {
+                id:         uuid::Uuid::new_v4().to_string(),
+                task_id:    task_id.clone(),
+                code_refs:  Vec::new(),
+                outcome:    outcome.clone(),
+                created_at: started_ms,
+            };
+            if let Err(e) = exp.store_test_run(run).await {
+                warn!(err = %e, "store_test_run failed (non-fatal)");
+            }
+        }
+
+        if outcome.success {
+            // ── R-22 Review gate ────────────────────────────────────────
+            // Sandbox passed (code compiles).  Now check the edited
+            // code_nodes against `standard_node` rules.  Block-severity
+            // violations re-enter Plan; Warn-severity are recorded but
+            // do not block completion.
+            let reviewer = match self.reviewer.as_ref() {
+                None    => break 'verify Ok(text),
+                Some(r) => r,
+            };
+            self.event_sink
+                .emit(AgentEvent::StateChanged { state: AgentState::Reviewing })
+                .await;
+
+            let violations = reviewer
+                .review(&task_id, /* code_refs = */ &Vec::new())
+                .await?;
+
+            // Best-effort persistence — failure here must not mask review
+            // results.
+            if let Some(exp) = &self.experience {
+                for v in &violations {
+                    if let Err(e) = exp.record_violation(v.clone()).await {
+                        warn!(err = %e, "record_violation failed (non-fatal)");
+                    }
+                }
+            }
+
+            let blocking: Vec<_> = violations
+                .iter()
+                .filter(|v| matches!(v.severity, Severity::Block))
+                .collect();
+
+            if blocking.is_empty() {
+                break 'verify Ok(text);
+            }
+
+            if review_attempts >= self.config.review_retries {
+                let summary = blocking
+                    .iter()
+                    .map(|v| format!("- {}: {}", v.standard_id, v.evidence))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                break 'verify Err(BrainError::Completion(format!(
+                    "Review failed after {} attempt(s). Blocking violations:\n{}",
+                    review_attempts + 1, summary,
+                )));
+            }
+
+            // Feed violations back to the model as a memory entry and
+            // re-enter Plan so it can refactor.
+            let summary = blocking
+                .iter()
+                .map(|v| format!("- {}: {}", v.standard_id, v.evidence))
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.memory
+                .push(MemoryEntry {
+                    role: "tool".into(),
+                    content: format!(
+                        "REVIEW VIOLATIONS — fix and re-emit the edits.\n{summary}"
+                    ),
+                })
+                .await?;
+            review_attempts += 1;
+            continue 'verify;
+        }
+
+        if verify_attempts >= self.config.verify_retries {
+            break 'verify Err(BrainError::Completion(format!(
+                "Verification failed after {} attempt(s). stderr tail:\n{}",
+                verify_attempts + 1,
+                outcome.stderr,
+            )));
+        }
+
+        // Failure with budget remaining: feed stderr back to the model and
+        // re-enter Plan.  The accumulated transcript carries the prior edits
+        // so the model can iterate on them.
+        self.memory
+            .push(MemoryEntry {
+                role: "tool".into(),
+                content: format!(
+                    "VERIFICATION FAILED (cargo check exit {}). Fix the code and re-emit the edits.\nstderr tail:\n{}",
+                    outcome.exit_code, outcome.stderr,
+                ),
+            })
+            .await?;
+        verify_attempts += 1;
+        continue 'verify;
         };
 
         // ── R-22 Reflection ─────────────────────────────────────────────────
@@ -349,26 +575,62 @@ where
                 },
             };
             let memory_row = TaskMemory {
-                id:         uuid::Uuid::new_v4().to_string(),
-                request:    prompt.to_string(),
-                actions:    action_log,
+                id:            task_id.clone(),
+                request:       prompt.to_string(),
+                actions:       overall_action_log,
                 outcome,
-                code_refs:  vec![],
-                session_id: String::new(),
+                code_refs:     vec![],
+                session_id:    String::new(),
+                input_tokens:  total_usage.input_tokens,
+                output_tokens: total_usage.output_tokens,
             };
             if let Err(e) = exp.store_task_memory(memory_row).await {
                 warn!(err = %e, "reflection write failed (non-fatal)");
             }
 
+            // ── Context compaction (Hermes-style /compress, automated) ─
+            // Run AFTER reflection (so the just-finished task is in
+            // memory for the summary), BEFORE distillation (so the
+            // worker sees the still-large recent slice for clustering).
+            if let Some(compactor) = self.compactor.as_ref() {
+                if self.config.compact_threshold > 0
+                    && self.config.compact_keep_recent < self.config.compact_threshold
+                {
+                    let all = self.memory.recent(usize::MAX).await.ok();
+                    if let Some(all) = all {
+                        if all.len() > self.config.compact_threshold {
+                            let cut    = all.len() - self.config.compact_keep_recent;
+                            let oldest = &all[..cut];
+                            match compactor.summarize(oldest).await {
+                                Ok(summary) => {
+                                    match self.memory.compact(
+                                        self.config.compact_keep_recent,
+                                        summary,
+                                    ).await {
+                                        Ok(n) => info!(compacted = n, "memory compacted"),
+                                        Err(e) => warn!(err = %e, "compact write failed"),
+                                    }
+                                }
+                                Err(e) => warn!(err = %e, "compactor summarize failed"),
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── Background distillation every N tasks ──────────────────
             let count = TASK_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
             if count % DISTILL_EVERY_N_TASKS == 0 {
-                let model = self.model.clone();
-                let exp = Arc::clone(exp);
+                let model  = self.model.clone();
+                let exp    = Arc::clone(exp);
+                let writer = self.skill_writer.clone();
                 tokio::spawn(async move {
-                    let worker = DistillationWorker::new(model, exp);
+                    let mut worker = DistillationWorker::new(model, exp);
+                    if let Some(w) = writer {
+                        worker = worker.with_skill_writer(w);
+                    }
                     match worker.run_once(50).await {
-                        Ok(n) => info!(insights = n, "background distillation complete"),
+                        Ok(n)  => info!(insights_and_skills = n, "background distillation complete"),
                         Err(e) => warn!(err = %e, "background distillation failed"),
                     }
                 });
@@ -626,6 +888,35 @@ where
     }
 }
 
+/// Tools whose side-effects on the workspace require sandbox verification.
+///
+/// Used by the R-21 verify gate to decide whether `cargo check` needs to
+/// run after the model returns plain text.
+const MUTATING_TOOLS: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "multi_edit",
+    "apply_patch",
+    "bash",
+    "run_command",
+];
+
+/// `true` iff an action log entry refers to a mutating tool.
+fn is_mutating_action(action: &str) -> bool {
+    action
+        .strip_prefix("tool:")
+        .map(|t| MUTATING_TOOLS.contains(&t))
+        .unwrap_or(false)
+}
+
+/// Unix epoch millis, or 0 if the system clock is misconfigured.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Advance the state machine by one step.
 fn transition(state: AgentState) -> AgentState {
     match state {
@@ -633,6 +924,9 @@ fn transition(state: AgentState) -> AgentState {
         AgentState::Planning  => AgentState::Acting,
         AgentState::Acting    => AgentState::Observing,
         AgentState::Observing => AgentState::Idle,
+        // Reviewing is a transient outer-loop state — if we somehow start
+        // an inner step from it, fall back to Idle to re-enter Planning.
+        AgentState::Reviewing => AgentState::Idle,
     }
 }
 

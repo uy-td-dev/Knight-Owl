@@ -9,8 +9,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::debug;
 
+use owl_protocol::code::Violation;
 use owl_protocol::experience::{
-    ExperienceError, ExperienceStore, Insight, InsightKind, TaskMemory, TaskOutcome,
+    ExperienceError, ExperienceStore, Insight, InsightKind, TaskMemory, TaskOutcome, TestRun,
 };
 
 use crate::{HybridStore, VaultError};
@@ -62,6 +63,40 @@ impl ExperienceStore for SurrealExperienceStore {
     async fn clear_insights(&self) -> Result<u64, ExperienceError> {
         self.store
             .clear_insights()
+            .await
+            .map_err(|e| ExperienceError::Store(e.to_string()))
+    }
+
+    async fn store_test_run(&self, run: TestRun) -> Result<(), ExperienceError> {
+        self.store
+            .store_test_run(run)
+            .await
+            .map_err(|e| ExperienceError::Store(e.to_string()))
+    }
+
+    async fn test_runs_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<TestRun>, ExperienceError> {
+        self.store
+            .test_runs_for_task(task_id)
+            .await
+            .map_err(|e| ExperienceError::Store(e.to_string()))
+    }
+
+    async fn record_violation(&self, v: Violation) -> Result<(), ExperienceError> {
+        self.store
+            .record_violation(v)
+            .await
+            .map_err(|e| ExperienceError::Store(e.to_string()))
+    }
+
+    async fn violations_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<Violation>, ExperienceError> {
+        self.store
+            .violations_for_task(task_id)
             .await
             .map_err(|e| ExperienceError::Store(e.to_string()))
     }

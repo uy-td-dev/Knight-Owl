@@ -11,8 +11,9 @@ name = "owl"
 path = "src/main.rs"
 
 [features]
-default = ["gemini"]
-gemini  = ["owl-tower/gemini"]
+default  = ["gemini"]
+gemini   = ["owl-tower/gemini"]
+telegram = ["owl-gateway/telegram"]
 
 [dependencies]
 owl-brain    = { workspace = true }
@@ -21,7 +22,10 @@ owl-tower    = { workspace = true }
 owl-armory   = { workspace = true }
 owl-vault    = { workspace = true }
 owl-cortex   = { workspace = true }
+owl-orchestra = { workspace = true }
 owl-sandbox  = { workspace = true }
+owl-scheduler = { workspace = true }
+owl-gateway  = { workspace = true }
 anyhow       = { workspace = true }
 surrealdb    = { workspace = true }
 uuid         = { workspace = true }

@@ -28,6 +28,7 @@ fn cfg() -> ReasoningConfig {
         max_steps: 4,
         memory_context_limit: 5,
         system_prompt: "You are a test assistant.".into(),
+        ..ReasoningConfig::default()
     }
 }
 

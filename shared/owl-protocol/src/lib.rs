@@ -18,6 +18,7 @@ pub mod memory;
 pub mod orchestra;
 pub mod pet;
 pub mod sandbox;
+pub mod schedule;
 pub mod state;
 pub mod tools;
 pub mod vector;

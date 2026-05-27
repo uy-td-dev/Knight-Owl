@@ -20,7 +20,7 @@ use surrealdb::engine::any::{connect, Any};
 use surrealdb::opt::auth::Root;
 use surrealdb::Surreal;
 
-use owl_protocol::memory::{MemoryEntry, MemoryError, MemoryStore};
+use owl_protocol::memory::{MemoryEntry, MemoryError, MemoryStore, SessionRecallHit};
 
 use crate::{Embedder, SurrealConfig};
 
@@ -186,6 +186,68 @@ impl MemoryStore for SurrealMemoryStore {
             .map_err(|e| MemoryError::Backend(e.to_string()))?;
         Ok(())
     }
+
+    /// BM25 over `session_memory.content` across every session except
+    /// `exclude_session`.  Falls back to substring match on backends
+    /// without a SEARCH index (kv-mem in tests).
+    async fn search_session_memory(
+        &self,
+        query:           &str,
+        exclude_session: &str,
+        limit:           usize,
+    ) -> Result<Vec<SessionRecallHit>, MemoryError> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // BM25 path: requires the conv_analyzer SEARCH index defined at connect.
+        let bm25_sql =
+            "SELECT session_id, role, content, \
+                    search::score(1) AS score \
+             FROM session_memory \
+             WHERE content @1@ $q AND session_id != $excl \
+             ORDER BY score DESC \
+             LIMIT $k";
+
+        let bm25 = self.db
+            .query(bm25_sql)
+            .bind(json!({
+                "q":    query,
+                "excl": exclude_session,
+                "k":    limit as i64,
+            }))
+            .await
+            .and_then(|mut r| { let v: Result<Vec<Value>, _> = r.take(0); v.map_err(Into::into) });
+
+        if let Ok(rows) = bm25 {
+            if !rows.is_empty() {
+                return Ok(rows.into_iter().filter_map(row_to_recall_hit).collect());
+            }
+        }
+
+        // Substring fallback (kv-mem, or BM25 yielded empty).
+        let q_lower = query.to_lowercase();
+        let mut resp = self.db
+            .query(
+                "SELECT session_id, role, content \
+                 FROM session_memory \
+                 WHERE string::contains(string::lowercase(content), $q) \
+                   AND session_id != $excl \
+                 LIMIT $k",
+            )
+            .bind(json!({
+                "q":    q_lower,
+                "excl": exclude_session,
+                "k":    limit as i64,
+            }))
+            .await
+            .map_err(|e| MemoryError::Backend(e.to_string()))?
+            .check()
+            .map_err(|e| MemoryError::Backend(e.to_string()))?;
+        let rows: Vec<Value> = resp.take(0)
+            .map_err(|e| MemoryError::Backend(e.to_string()))?;
+        Ok(rows.into_iter().filter_map(row_to_recall_hit).collect())
+    }
 }
 
 fn row_to_entry(v: Value) -> Option<MemoryEntry> {
@@ -193,5 +255,15 @@ fn row_to_entry(v: Value) -> Option<MemoryEntry> {
     Some(MemoryEntry {
         role:    obj.get("role")?.as_str()?.to_string(),
         content: obj.get("content")?.as_str()?.to_string(),
+    })
+}
+
+fn row_to_recall_hit(v: Value) -> Option<SessionRecallHit> {
+    let obj = v.as_object()?;
+    Some(SessionRecallHit {
+        session_id: obj.get("session_id")?.as_str()?.to_string(),
+        role:       obj.get("role")?.as_str()?.to_string(),
+        content:    obj.get("content")?.as_str()?.to_string(),
+        score:      obj.get("score").and_then(Value::as_f64).unwrap_or(0.0) as f32,
     })
 }

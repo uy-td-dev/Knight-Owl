@@ -26,6 +26,7 @@ pub mod loader;
 pub mod path;
 pub mod registry;
 pub mod scan;
+pub mod skill_writer;
 pub mod watcher;
 pub mod workflow;
 
@@ -34,6 +35,7 @@ pub use loader::{FsLoader, InMemoryLoader, Loader};
 pub use path::OrchestraRoots;
 pub use registry::{InMemoryRegistry, Registry, RegistryEvent, RegistrySnapshot};
 pub use scan::{scan_roots, ScanReport};
+pub use skill_writer::FsSkillWriter;
 pub use watcher::{OrchestraWatcher, WatchError};
 pub use workflow::{
     SequentialEngine, StepResult, StepStatus, TokenUsage, WorkflowEngine, WorkflowError,

@@ -1,13 +1,15 @@
 # Knight-Owl 🦉⚔️
 
-> A modular, multi-LLM AI coding agent built in Rust — local-first, sandboxed, with a persistent knowledge graph and a friendly desktop UI.
+> A modular, multi-LLM AI coding agent built in Rust — local-first, sandboxed, with a persistent knowledge graph, autonomous learning, and cron-driven automation.
 
 Knight-Owl is a **full-stack agentic framework**: pluggable LLM providers
 (Claude / Gemini / Ollama), native + MCP tools, a 4-layer knowledge graph
-backed by SurrealDB, sandboxed execution, and a Tauri v2 desktop client
-with a chibi owl companion.  Designed to feel like Claude Code or Cursor
-but architected so every component — model, tool, memory store, sandbox —
-is a trait object you can swap.
+backed by SurrealDB, sandboxed execution, autonomous skill creation,
+context compaction, token accounting, scheduled tasks, in-chat slash
+commands, and a Telegram messaging gateway.  Designed to feel like Claude
+Code or Hermes Agent but architected so every component — model, tool,
+memory store, sandbox, reviewer, compactor — is a trait object you can
+swap.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -54,18 +56,40 @@ runs are seconds.
 ```bash
 cargo run -p owl-cli -- index .                            # build the code graph
 cargo run -p owl-cli -- chat "explain how the loop works"  # one-shot question
+cargo run -p owl-cli -- chat --repl                        # interactive REPL with /slash commands
 cargo run -p owl-cli -- watch                              # hot-reindex on file changes
+cargo run -p owl-cli -- schedule add "morning" "0 0 9 * * Mon-Fri" "summarize yesterday's git diff"
+cargo run -p owl-cli -- schedule daemon                    # cron daemon — fires scheduled tasks
+cargo run -p owl-cli --features telegram -- gateway start --telegram
 ```
 
 ---
 
 ## What's in the box
 
-### 🧠 Polyglot agent loop
-- **Plan → Act → Observe** state machine (`owl-brain`)
-- Parallel tool dispatch — agent issues multiple `read_file` calls at once
+### 🧠 Polyglot agent loop with 5-phase autonomy
+**Locate (graph) → Plan → Act → Observe → Verify (sandbox) → Review (standards) → Learn**
+— every phase backed by a swappable trait in `owl-brain`:
+
+- **Plan → Act → Observe** state machine + parallel tool dispatch
+- **Locate (R-20)** — `hybrid_retrieve` combines BM25 + vector + graph
+  walk (depth 2) across the 4-layer knowledge graph; provenance tags
+  (`bm25` / `vector` / `graph:N`) ship with every snippet
+- **Verify (R-21)** — every edit-producing turn runs `cargo check` in
+  the sandbox; stderr feeds back into Plan on failure with bounded retry
+  budget; `TestRun` rows persist to L4
+- **Review (R-22)** — `Reviewer` trait checks edited code against
+  `standard_node` rules (R-1 length, R-9 unwrap, R-10 doc comments…);
+  `Severity::Block` violations re-enter Plan, `Warn` are recorded
+- **Learn** — every task writes a `TaskMemory` row; distillation every
+  10 tasks clusters them into `Insight` rows AND auto-writes reusable
+  `.knight-owl/skills/<id>.md` skills from high-success clusters
+- **Context compaction** — when memory grows past `compact_threshold`
+  the loop folds older turns into one summary entry via `LlmCompactor`
+- **Token + cost tracking** — every `TaskMemory` records input/output
+  token counts; `/usage` shows session totals
 - Step-level + token-level streaming via Tauri events
-- Sandboxed bash execution (Docker isolation, R-21)
+- Sandboxed bash execution (Docker isolation)
 - Per-tool approval policy (`bash`/`write_file`/`edit_file` ask first)
 - Automatic prompt caching when on Anthropic (~10× cheaper cached tokens)
 - Multi-modal: image attachments → native vision API (Claude / Gemini)
@@ -92,8 +116,18 @@ Chick → Owlet → Adult → Sage with `set_pet_level` dev cheat.
 
 ### 🔌 Extensibility today
 - **MCP servers** — add tools via stdio / WS / HTTP, no recompile
-- **Orchestra** — drop `*.yaml` agent / skill / workflow specs into
+- **Orchestra** — drop `*.md` agent / skill / workflow specs into
   `.knight-owl/`, watched + hot-reloaded
+- **Auto-skills** — distillation writes `.knight-owl/skills/auto-<id>.md`
+  from recurring success patterns (≥ 5 successful tasks with same
+  request shape); orchestra picks them up live
+- **Slash commands** — `/help`, `/usage`, `/skills`, `/clear`,
+  `/compact`, `/model` work in CLI REPL and as one-shot args
+- **Cron scheduler** — `owl schedule add "name" "0 0 9 * * Mon-Fri"
+  "<prompt>"` for unattended runs; persisted in SurrealDB
+- **Messaging gateway** — Telegram bridge today
+  (`owl gateway start --telegram` with `OWL_TG_TOKEN`); Discord / Slack
+  follow the same `MessagingAdapter` trait
 - **Hooks** (planned) — pre/post-tool shell callbacks
 - **WASM plugins** (planned) — language-agnostic tool plugins via
   Wasmtime Component Model
@@ -102,7 +136,11 @@ Chick → Owlet → Adult → Sage with `set_pet_level` dev cheat.
 - Conversations in `~/.knight-owl/chats/<workspace_id>/<conv_id>.json`
 - Agent-event log per conv → replay full reasoning trace on resume
   (`load_event_log` Tauri command)
-- Memory + insights survive app restarts via SurrealDB
+- Memory + insights + auto-skills + cron tasks survive restarts via SurrealDB
+- **Cross-session FTS recall** — BM25 over every past session's
+  `session_memory.content`; relevant past turns auto-injected as
+  `<past_sessions>` context block (excludes the active session to avoid
+  echoing yourself back)
 - Pet level + stats persisted too — close app, owlet's still hungry tomorrow
 
 ---
@@ -121,15 +159,19 @@ knight-owl/
 │   └── owl-protocol/          # Shared types (zero internal deps)
 │
 ├── crates/
-│   ├── owl-brain/             # Orchestrator: reasoning loop, memory, factory
+│   ├── owl-brain/             # Orchestrator: loop, memory, reviewer,
+│   │                          # compactor, skill writer, distillation
 │   ├── owl-tower/             # LLM adapters: Claude / Gemini / Ollama, cache
 │   ├── owl-armory/            # Native tools: read/write/edit/grep/bash/...
 │   ├── owl-mcp/               # MCP client — stdio / WS / HTTP transports
-│   ├── owl-vault/             # SurrealDB hybrid graph + vector + pet store
+│   ├── owl-vault/             # SurrealDB hybrid graph + vector +
+│   │                          # standards + scheduler + pet stores
 │   ├── owl-cortex/            # Tree-sitter + LSP → L1/L2 layers
 │   ├── owl-cartographer/      # GraphRAG entity/relation extraction → L3
 │   ├── owl-sandbox/           # Docker (bollard) + local subprocess runner
-│   ├── owl-orchestra/         # Agents / skills / workflows registry + watcher
+│   ├── owl-orchestra/         # Agents / skills / workflows + FsSkillWriter
+│   ├── owl-scheduler/         # Cron runner + ScheduledTask + InMemoryStore
+│   ├── owl-gateway/           # MessagingAdapter trait + Telegram (gated)
 │   └── owl-harness/           # Mock engine + evaluator (dev-only)
 │
 ├── config/
@@ -265,27 +307,50 @@ consumers.
 
 ## Status / Roadmap
 
-✅ **Done**
+✅ **Foundation (R-20/21/22)**
+- Graph-first Locate — `hybrid_retrieve` (BM25 + vector + graph BFS)
+- Sandbox-Verified Execute — `cargo check` gate per edit + `TestRun`
+  rows in L4 + retry budget with stderr feedback
+- Review phase + `standard_node` — `Reviewer` trait, default seeded
+  rules (R-1 / R-9 / R-10), Block/Warn severity gating
+
+✅ **Tier 1 — Production hardening**
+- Auto context compaction (`LlmCompactor` + `MemoryStore::compact`)
+- Token usage tracking on every `TaskMemory`; `session_usage(sid)`
+- Cross-session FTS recall via SurrealDB BM25 + substring fallback
+
+✅ **Hermes-parity UX**
+- Auto-Skill Writer — distillation outputs reusable `.md` skills
+- Cron scheduler (`owl schedule add/list/remove/daemon`) backed by
+  `cron_task` table
+- In-chat slash commands (`/help`, `/usage`, `/skills`, `/clear`,
+  `/compact`, `/model`) + `--repl` interactive mode
+- Messaging gateway — Telegram bridge today, `MessagingAdapter` trait
+  open for Discord / Slack / WhatsApp / Email
+
+✅ **Core (earlier)**
 - Multi-provider tower (Claude / Gemini / Ollama) with native streaming
 - Parallel tool dispatch + per-tool approval policy
 - Anthropic prompt caching (auto)
 - Vision input (image attachments → native multi-modal request)
 - Sandboxed bash via Docker
 - SurrealDB-backed memory + insights + 4-layer code graph
-- GraphRAG retrieval (BM25 + vector + graph walk)
 - Orchestra registry (agents/skills/workflows) with hot-reload
 - Owl chibi pet with codex-pets sprite + auto-think mind task
-- Tauri commands: `clear_memory`, `clear_insights`, `set_pet_level`,
-  `resolve_tool_approval`, `load_event_log`, etc.
-- Unified `settings.json` (no scattered env vars required)
+- Unified `settings.json`
 
 🚧 **In progress / planned**
-- Native function-calling protocol (replace embedded-JSON tool format
-  for more reliable local-model tool use)
+- Real reasoning-loop wiring for `schedule daemon` + `gateway start`
+  (currently stub `LoggingRunner`) — blocked on extracting
+  `chat::build_loop` into a reusable factory
+- Production `RuleBasedReviewer` (regex + clippy parser) — wiring done,
+  rule bodies stubbed
+- `DEFINE EVENT` trigger for distillation (counter-driven today)
+- Native function-calling protocol (replace embedded-JSON tool format)
 - WASM plugin host (Wasmtime Component Model)
 - IDE-mode LSP server exposing the knowledge graph
-- Conversation branching UI
-- Cost router (cheap model for retrieval, smart model for execution)
+- User modeling (Honcho-style dialectic profile)
+- Voice transcription via Whisper for the messaging gateway
 
 ---
 
@@ -295,11 +360,17 @@ consumers.
 # Build everything
 cargo check --workspace
 
-# Run tests
+# Run tests — should show 44 binaries, 0 fail
 cargo test --workspace
 
-# Brain tests in isolation
-cargo test -p owl-brain --lib
+# Brain tests in isolation (includes verify/review/skills/compaction/usage)
+cargo test -p owl-brain
+
+# Gateway with Telegram feature
+cargo test -p owl-gateway
+
+# Scheduler unit tests
+cargo test -p owl-scheduler
 
 # Run UI typecheck
 cd apps/owl-desktop/ui && npx tsc --noEmit
@@ -307,6 +378,17 @@ cd apps/owl-desktop/ui && npx tsc --noEmit
 # Build production desktop bundle (macOS / Linux / Windows)
 cd apps/owl-desktop/src-tauri && cargo tauri build
 ```
+
+### Environment knobs
+
+| Env var | Effect |
+|---|---|
+| `OWL_SANDBOX_VERIFY=0`   | Disable R-21 verify gate (post-edit `cargo check`) |
+| `OWL_SANDBOX_BASH=0`     | Run `bash` tool host-direct instead of in `LocalSandbox` |
+| `OWL_AUTOSKILL=0`        | Disable Phase A auto-skill generation |
+| `OWL_TG_TOKEN`           | Telegram bot token (required for `gateway start --telegram`) |
+| `OWL_BRAIN_MAX_STEPS`    | Cap on reasoning-loop iterations |
+| `OWL_BRAIN_MEMORY_LIMIT` | Cap on memory-context entries per turn |
 
 See `CLAUDE.md` for the in-depth contributor guide — agent
 responsibilities per crate, the SOLID/KISS/DRY rules, configuration

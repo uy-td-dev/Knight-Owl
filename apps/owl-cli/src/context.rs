@@ -1,82 +1,116 @@
-//! `GraphContextProvider` — bridges owl-vault's code graph to owl-brain's
-//! `ContextProvider` trait.
+//! `GraphContextProvider` — thin wrapper that hands every Plan-phase prompt
+//! to `owl_vault::hybrid_retrieve` (WF-13, R-20) and, when configured, to
+//! cross-session FTS recall (Phase G).
 //!
-//! On each planning step the reasoning loop calls `retrieve(prompt)`:
-//!   1. Extract keywords from the prompt (split on whitespace + punctuation).
-//!   2. For each keyword that is ≥ 4 chars, run `search_code_nodes`.
-//!   3. Deduplicate by node id, keep the top 20 by relevance.
-//!   4. Format each as a self-contained snippet for the LLM.
+//! The actual retrieval pipelines live in `owl-vault` so the CLI and
+//! desktop apps share one implementation.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use owl_brain::{BrainError, ContextProvider};
-use owl_protocol::code::CodeNode;
-use owl_vault::HybridStore;
+use owl_protocol::memory::MemoryStore;
+use owl_vault::{hybrid_retrieve, Embedder, HybridRetrieveConfig, HybridStore};
 
-/// Provides code-graph context from the hybrid store.
+/// Bridge: hooks WF-13 hybrid retrieval into the reasoning loop, plus
+/// optional cross-session memory recall.
 pub struct GraphContextProvider {
-    store: Arc<dyn HybridStore>,
+    store:           Arc<dyn HybridStore>,
+    embedder:        Option<Arc<dyn Embedder>>,
+    config:          HybridRetrieveConfig,
+    /// Memory store used for cross-session FTS recall.  When set, every
+    /// retrieve() also pulls top-N hits from OTHER sessions and appends
+    /// them under `<past_sessions>`.
+    session_memory:  Option<Arc<dyn MemoryStore>>,
+    /// Session to exclude from cross-session hits (the active one).
+    current_session: String,
+    /// Cap on past-session hits per retrieve.
+    session_recall_k: usize,
 }
 
 impl GraphContextProvider {
-    /// Create a provider backed by the given store.
+    /// Create a BM25-only provider — adequate for read-only navigation but
+    /// strictly worse than wiring an embedder.
     pub fn new(store: Arc<dyn HybridStore>) -> Self {
-        Self { store }
+        Self {
+            store, embedder: None, config: HybridRetrieveConfig::default(),
+            session_memory: None,
+            current_session: String::new(),
+            session_recall_k: 5,
+        }
+    }
+
+    /// Attach an embedder to enable the semantic-vector seed leg.
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
+    }
+
+    /// Enable Phase G cross-session memory recall.  `current_session`
+    /// excludes the active session from results so the agent doesn't see
+    /// its own in-progress turns echoed back.
+    pub fn with_session_recall(
+        mut self,
+        memory:          Arc<dyn MemoryStore>,
+        current_session: String,
+    ) -> Self {
+        self.session_memory  = Some(memory);
+        self.current_session = current_session;
+        self
     }
 }
 
 #[async_trait]
 impl ContextProvider for GraphContextProvider {
     async fn retrieve(&self, prompt: &str) -> Result<Vec<String>, BrainError> {
-        let keywords = extract_keywords(prompt);
-        if keywords.is_empty() {
-            return Ok(Vec::new());
-        }
+        // Code graph context — existing.
+        let mut snippets = hybrid_retrieve(
+            &*self.store,
+            self.embedder.as_deref(),
+            prompt,
+            &self.config,
+        )
+        .await
+        .map_err(|e| BrainError::ContextRetrieval(e.to_string()))?;
 
-        let mut seen: HashMap<String, CodeNode> = HashMap::new();
-        for kw in &keywords {
-            let nodes = self
-                .store
-                .search_code_nodes(kw, 10)
+        // Phase G — cross-session conversation recall.
+        if let Some(mem) = &self.session_memory {
+            let hits = mem
+                .search_session_memory(
+                    prompt,
+                    &self.current_session,
+                    self.session_recall_k,
+                )
                 .await
                 .map_err(|e| BrainError::ContextRetrieval(e.to_string()))?;
-            for node in nodes {
-                seen.entry(node.id.clone()).or_insert(node);
-            }
-            if seen.len() >= 20 {
-                break;
+            if !hits.is_empty() {
+                let body = hits
+                    .iter()
+                    .map(|h| format!(
+                        "[session:{} role:{}] {}",
+                        truncate(&h.session_id, 8),
+                        h.role,
+                        truncate(&h.content, 200),
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                snippets.push(format!(
+                    "<past_sessions>\n{body}\n</past_sessions>"
+                ));
             }
         }
 
-        Ok(seen.into_values().map(format_node).collect())
+        Ok(snippets)
     }
 }
 
-/// Format a code node as a single context snippet for the LLM.
-fn format_node(n: CodeNode) -> String {
-    let mut s = format!(
-        "[{}:L{}-{}] {:?} `{}`",
-        n.file_path, n.start_line, n.end_line, n.kind, n.name
-    );
-    if !n.description.is_empty() {
-        s.push_str(&format!("\n  doc: {}", n.description.lines().next().unwrap_or("")));
+/// Truncate to `max` chars, appending `…` when cut.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{head}…")
     }
-    if !n.preview.is_empty() {
-        s.push_str(&format!("\n  {}", n.preview.trim()));
-    }
-    s
-}
-
-/// Split prompt into keywords ≥ 4 chars, deduplicated.
-fn extract_keywords(prompt: &str) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    prompt
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|w| w.len() >= 4)
-        .map(|w| w.to_lowercase())
-        .filter(|w| seen.insert(w.clone()))
-        .collect()
 }

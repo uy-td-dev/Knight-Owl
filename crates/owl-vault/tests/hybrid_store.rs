@@ -264,6 +264,8 @@ async fn store_and_recall_task_memory() {
         outcome: TaskOutcome::Success,
         code_refs: vec!["src/lib.rs".into()],
         session_id: "sess-1".into(),
+        input_tokens: 0,
+        output_tokens: 0,
     };
     store.store_task_memory(mem).await.unwrap();
     let mems = store.recent_task_memories(10).await.unwrap();

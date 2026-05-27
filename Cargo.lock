@@ -1082,6 +1082,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
+name = "cron"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f8c3e73077b4b4a6ab1ea5047c37c57aee77657bc8ecd6f29b0af082d0b0c07"
+dependencies = [
+ "chrono",
+ "nom",
+ "once_cell",
+]
+
+[[package]]
 name = "crossbeam"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4270,8 +4281,11 @@ dependencies = [
  "owl-armory",
  "owl-brain",
  "owl-cortex",
+ "owl-gateway",
+ "owl-orchestra",
  "owl-protocol",
  "owl-sandbox",
+ "owl-scheduler",
  "owl-tower",
  "owl-vault",
  "serde",
@@ -4338,10 +4352,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "owl-gateway"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "owl-brain",
+ "owl-protocol",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "owl-harness"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "owl-armory",
  "owl-brain",
  "owl-orchestra",
@@ -4382,6 +4412,7 @@ dependencies = [
  "tokio-util",
  "toml 0.8.2",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4410,6 +4441,23 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "owl-scheduler"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "cron",
+ "owl-brain",
+ "owl-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

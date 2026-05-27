@@ -34,6 +34,7 @@ use owl_brain::{
 };
 use owl_orchestra::compose::compose_system_prompt;
 use owl_protocol::orchestra::{AgentSpec, ProviderRef, SkillSpec};
+use owl_protocol::sandbox::Sandbox;
 
 /// Desktop-side factory.
 ///
@@ -62,6 +63,11 @@ where
     /// agent this factory spawns (so sub-agents using a 2 B local model
     /// also get the short prompt + tight budgets).
     model_class: owl_brain::ModelClass,
+    /// R-21 sandbox + workspace.  When both are `Some`, every agent
+    /// spawned by this factory verifies its edits with `cargo check`
+    /// before completing.  When `sandbox` is `None`, verification is off.
+    sandbox: Option<Arc<dyn Sandbox>>,
+    workspace_path: Option<String>,
 }
 
 impl<M> DesktopAgentFactory<M>
@@ -77,7 +83,24 @@ where
         provider_label: &'static str,
         model_class: owl_brain::ModelClass,
     ) -> Self {
-        Self { model, executor, memory, ctx, memory_context_limit, provider_label, model_class }
+        Self {
+            model, executor, memory, ctx, memory_context_limit,
+            provider_label, model_class,
+            sandbox: None, workspace_path: None,
+        }
+    }
+
+    /// Enable R-21 sandbox verification for every agent built by this
+    /// factory.  Both arguments are required — a sandbox with no workspace
+    /// has nothing to mount; a workspace with no sandbox cannot verify.
+    pub fn with_sandbox(
+        mut self,
+        sandbox:        Arc<dyn Sandbox>,
+        workspace_path: String,
+    ) -> Self {
+        self.sandbox        = Some(sandbox);
+        self.workspace_path = Some(workspace_path);
+        self
     }
 
     /// Compute the effective `ToolExecutor` for an agent — wraps the shared
@@ -152,6 +175,7 @@ where
         cfg.memory_context_limit = self.memory_context_limit
             .min(cfg.memory_context_limit);
         cfg.system_prompt        = system_prompt;
+        cfg.workspace_path       = self.workspace_path.clone();
 
         // Tool surface for this agent.
         let executor = self.executor_for(&spec);
@@ -165,6 +189,9 @@ where
         );
         if let Some(ctx) = &self.ctx {
             rl = rl.with_context(Arc::clone(ctx));
+        }
+        if let Some(sb) = &self.sandbox {
+            rl = rl.with_sandbox(Arc::clone(sb));
         }
 
         Ok(Arc::new(rl) as Arc<dyn AgentRunner>)

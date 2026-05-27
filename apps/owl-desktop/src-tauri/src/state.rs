@@ -316,6 +316,26 @@ async fn build_runner(
         };
     let tools_vec = build_registry_with_root_and_sandbox(workspace_root.clone(), bash_sandbox);
 
+    // R-21 verify sandbox — runs `cargo check` after any edit-producing turn.
+    // Independent of `OWL_SANDBOX_BASH`: bash isolation and verify-after-edit
+    // serve different goals.  Disable with `OWL_SANDBOX_VERIFY=0`.
+    let verify_sandbox: Option<Arc<dyn owl_protocol::sandbox::Sandbox>> =
+        match std::env::var("OWL_SANDBOX_VERIFY").as_deref() {
+            Ok("0") | Ok("false") => None,
+            _                     => Some(Arc::new(owl_sandbox::LocalSandbox::new())),
+        };
+
+    // Hermes-style procedural memory: background distillation writes
+    // auto-skills into <workspace>/.knight-owl/skills/.  Disable with
+    // `OWL_AUTOSKILL=0`.
+    let skill_writer: Option<Arc<dyn owl_brain::SkillWriter>> =
+        match std::env::var("OWL_AUTOSKILL").as_deref() {
+            Ok("0") | Ok("false") => None,
+            _ => Some(Arc::new(
+                owl_orchestra::FsSkillWriter::for_workspace(&workspace_for_state),
+            ) as Arc<dyn owl_brain::SkillWriter>),
+        };
+
     let vault_cfg = VaultConfig::load();
     tracing::info!(
         endpoint = %vault_cfg.endpoint,
@@ -368,6 +388,11 @@ async fn build_runner(
         // memory bigger than the class allows.
         rl_cfg.memory_context_limit =
             brain_cfg.memory_context_limit.min(rl_cfg.memory_context_limit);
+    }
+    // R-21: hand the workspace path to the loop so it can mount it into
+    // the sandbox for `cargo check`.  Skipped when verify is disabled.
+    if verify_sandbox.is_some() {
+        rl_cfg.workspace_path = Some(workspace_root.to_string_lossy().into_owned());
     }
     tracing::info!(
         model = %tower_cfg.model,
@@ -439,17 +464,20 @@ async fn build_runner(
     macro_rules! build_loop {
         ($model:expr, $provider_label:expr) => {{
             let m = $model;
-            let factory: Arc<dyn owl_brain::AgentFactory> = Arc::new(
-                crate::agent_factory::DesktopAgentFactory::new(
-                    m.clone(),
-                    Arc::clone(&executor),
-                    Arc::clone(&memory),
-                    ctx_provider.clone(),
-                    brain_cfg.memory_context_limit,
-                    $provider_label,
-                    rl_cfg.model_class,
-                ),
+            let factory_inner = crate::agent_factory::DesktopAgentFactory::new(
+                m.clone(),
+                Arc::clone(&executor),
+                Arc::clone(&memory),
+                ctx_provider.clone(),
+                brain_cfg.memory_context_limit,
+                $provider_label,
+                rl_cfg.model_class,
             );
+            let factory_inner = match (verify_sandbox.clone(), rl_cfg.workspace_path.clone()) {
+                (Some(sb), Some(ws)) => factory_inner.with_sandbox(sb, ws),
+                _                    => factory_inner,
+            };
+            let factory: Arc<dyn owl_brain::AgentFactory> = Arc::new(factory_inner);
             let mut loop_ = ReasoningLoop::new(
                 m.clone(), Arc::clone(&executor), Arc::clone(&memory), rl_cfg.clone(),
             );
@@ -459,6 +487,17 @@ async fn build_runner(
             if let Some(exp) = experience.clone() {
                 loop_ = loop_.with_experience(exp);
             }
+            if let Some(sb) = verify_sandbox.clone() {
+                loop_ = loop_.with_sandbox(sb);
+            }
+            if let Some(sw) = skill_writer.clone() {
+                loop_ = loop_.with_skill_writer(sw);
+            }
+            // Hermes-style context compaction — auto-shrinks memory once
+            // it grows past `compact_threshold` entries.
+            let compactor: Arc<dyn owl_brain::Compactor> =
+                Arc::new(owl_brain::LlmCompactor::new(m.clone()));
+            loop_ = loop_.with_compactor(compactor);
             // Step-level streaming: every state change / tool call / result
             // is broadcast on the `agent_event` Tauri channel for the UI AND
             // appended to the per-conv `*.events.jsonl` log for resume AND
@@ -628,7 +667,7 @@ async fn try_surreal(
     // Stable session id per workstation user — keeps memory persistent
     // across app restarts.  TODO: per-conversation IDs once UI tracks them.
     let session_id = "knight-owl-desktop".to_string();
-    let mem = match SurrealMemoryStore::connect(surreal_cfg, session_id, Some(Arc::clone(&embedder))).await {
+    let mem = match SurrealMemoryStore::connect(surreal_cfg, session_id.clone(), Some(Arc::clone(&embedder))).await {
         Ok(m) => Arc::new(m) as Arc<dyn owl_brain::MemoryStore>,
         Err(e) => {
             warn!(err = %e, "SurrealMemoryStore connect failed");
@@ -637,8 +676,11 @@ async fn try_surreal(
     };
 
     let graph_ctx: Arc<dyn ContextProvider> = Arc::new(GraphContextProvider {
-        store: Arc::clone(&store),
-        embedder: Arc::clone(&embedder),
+        store:           Arc::clone(&store),
+        embedder:        Arc::clone(&embedder),
+        // Phase G — share the same MemoryStore for cross-session recall.
+        session_memory:  Some(Arc::clone(&mem) as Arc<dyn owl_protocol::memory::MemoryStore>),
+        current_session: session_id,
     });
     // Wrap with ProjectContextProvider so EVERY turn prepends `<project_stack>`
     // + CLAUDE.md framing — the model sees what kind of project this is
@@ -824,100 +866,52 @@ impl ContextProvider for ProjectContextProvider {
 
 // ── GraphContextProvider ────────────────────────────────────────────────────
 
-/// Provides code-graph context snippets for the reasoning loop.
+/// Bridge to WF-13 hybrid retrieval — see `owl_vault::hybrid_retrieve`.
 ///
-/// Uses true GraphRAG retrieval per WF-13:
-///   1. BM25 keyword search (top 8 seeds)
-///   2. Vector search (top 8 seeds)
-///   3. Reciprocal Rank Fusion → top 5 seeds
-///   4. 1-hop graph walk via CALLS + REFERENCES edges → expand neighbourhood
-///   5. Deduplicate + format top 10 context chunks
+/// Both `owl-cli` and `owl-desktop` use the same retrieval implementation
+/// from `owl-vault`; this is a thin `ContextProvider` adapter that also
+/// folds in Phase G cross-session memory recall when wired.
 struct GraphContextProvider {
-    store: Arc<dyn owl_vault::HybridStore>,
-    embedder: Arc<dyn owl_vault::Embedder>,
+    store:           Arc<dyn owl_vault::HybridStore>,
+    embedder:        Arc<dyn owl_vault::Embedder>,
+    /// Optional Phase G recall — set when persistent memory is online.
+    session_memory:  Option<Arc<dyn owl_protocol::memory::MemoryStore>>,
+    current_session: String,
 }
 
 #[async_trait]
 impl ContextProvider for GraphContextProvider {
     async fn retrieve(&self, prompt: &str) -> Result<Vec<String>, BrainError> {
-        use owl_protocol::code::CodeEdgeKind;
+        let mut snippets = owl_vault::hybrid_retrieve(
+            &*self.store,
+            Some(&*self.embedder),
+            prompt,
+            &owl_vault::HybridRetrieveConfig::default(),
+        )
+        .await
+        .map_err(|e| BrainError::ContextRetrieval(e.to_string()))?;
 
-        let keywords: Vec<&str> = prompt
-            .split_whitespace()
-            .filter(|w| w.len() >= 4)
-            .take(6)
-            .collect();
-        if keywords.is_empty() {
-            return Ok(vec![]);
-        }
-        let query = keywords.join(" ");
-
-        // ── Step 1+2: Parallel BM25 + Vector seeds ─────────────────────────
-        let kw_nodes = self
-            .store
-            .keyword_search(&query, 8)
-            .await
-            .unwrap_or_default();
-
-        let vec_nodes = match self.embedder.embed(prompt).await {
-            Ok(emb) => self
-                .store
-                .vector_search_code_nodes(emb.values, 8)
+        if let Some(mem) = &self.session_memory {
+            let hits = mem
+                .search_session_memory(prompt, &self.current_session, 5)
                 .await
-                .unwrap_or_default(),
-            Err(_) => vec![],
-        };
-
-        // ── Step 3: RRF merge → top 5 seeds ────────────────────────────────
-        let mut seen = std::collections::HashSet::new();
-        let mut seeds = Vec::new();
-        for node in kw_nodes.into_iter().chain(vec_nodes.into_iter()) {
-            if seen.insert(node.id.clone()) {
-                seeds.push(node);
-            }
-        }
-        seeds.truncate(5);
-
-        // ── Step 4: 1-hop graph expansion via CALLS + REFERENCES ────────────
-        let mut expanded = Vec::new();
-        for seed in &seeds {
-            // Outgoing: what does this node call / reference?
-            let callees = self.store
-                .code_edges_from(&seed.id, CodeEdgeKind::Calls)
-                .await
-                .unwrap_or_default();
-            let refs = self.store
-                .code_edges_from(&seed.id, CodeEdgeKind::References)
-                .await
-                .unwrap_or_default();
-            for neighbour in callees.into_iter().chain(refs.into_iter()) {
-                if seen.insert(neighbour.id.clone()) {
-                    expanded.push(neighbour);
-                }
+                .map_err(|e| BrainError::ContextRetrieval(e.to_string()))?;
+            if !hits.is_empty() {
+                let body = hits
+                    .iter()
+                    .map(|h| format!(
+                        "[session:{} role:{}] {}",
+                        &h.session_id.chars().take(8).collect::<String>(),
+                        h.role,
+                        h.content.chars().take(200).collect::<String>(),
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                snippets.push(format!("<past_sessions>\n{body}\n</past_sessions>"));
             }
         }
 
-        // ── Step 5: Assemble final context ──────────────────────────────────
-        // Seeds first (higher relevance), then graph neighbours.
-        let mut all = seeds;
-        all.extend(expanded);
-        all.truncate(10);
-
-        Ok(all
-            .into_iter()
-            .map(|n| {
-                let doc = if n.description.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n// {}", n.description)
-                };
-                format!(
-                    "// {:?} {} ({}:{}–{}){}\n{}",
-                    n.kind, n.name, n.file_path, n.start_line, n.end_line,
-                    doc, n.preview
-                )
-            })
-            .collect())
+        Ok(snippets)
     }
 }
 

@@ -1,0 +1,25 @@
+[package]
+name        = "owl-gateway"
+description = "Multi-platform messaging gateway — bridges Telegram/Discord/etc to the agent loop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default  = []
+telegram = ["dep:reqwest"]
+
+[dependencies]
+owl-protocol = { workspace = true }
+owl-brain    = { workspace = true }
+
+async-trait  = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+
+# Telegram-only — gated.
+reqwest      = { workspace = true, optional = true }

@@ -11,6 +11,8 @@ members = [
     "crates/owl-harness",
     "crates/owl-orchestra",
     "crates/owl-sandbox",
+    "crates/owl-scheduler",
+    "crates/owl-gateway",
     "apps/owl-cli",
     "apps/owl-desktop/src-tauri",
 ]
@@ -36,6 +38,8 @@ owl-cortex   = { path = "crates/owl-cortex" }
 owl-harness  = { path = "crates/owl-harness" }
 owl-orchestra = { path = "crates/owl-orchestra" }
 owl-sandbox  = { path = "crates/owl-sandbox" }
+owl-scheduler = { path = "crates/owl-scheduler" }
+owl-gateway  = { path = "crates/owl-gateway" }
 
 # Core
 rig-core     = { version = "0.36" }
@@ -63,3 +67,5 @@ git2         = { version = "0.19", default-features = false }
 toml         = { version = "0.8" }
 notify       = { version = "6" }
 tokio-util   = { version = "0.7", features = ["rt"] }
+cron         = { version = "0.12" }
+chrono       = { version = "0.4", default-features = false, features = ["clock"] }

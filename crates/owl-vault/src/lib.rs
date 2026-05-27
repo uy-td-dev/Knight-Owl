@@ -16,6 +16,7 @@ pub mod error;
 pub mod experience;
 pub mod memory;
 pub mod pet;
+pub mod scheduler;
 pub mod store;
 pub mod surreal;
 
@@ -25,5 +26,9 @@ pub use error::VaultError;
 pub use experience::{Distiller, SurrealExperienceStore};
 pub use memory::SurrealMemoryStore;
 pub use pet::{PetStore, SurrealPetStore};
-pub use store::{EntityGraphData, FileWithStats, GraphData, HybridStore, KbStats};
+pub use scheduler::SurrealSchedulerStore;
+pub use store::{
+    hybrid_retrieve, walk_graph, EntityGraphData, FileWithStats, GraphData, HybridRetrieveConfig,
+    HybridStore, KbStats, WalkHit,
+};
 pub use surreal::{SurrealConfig, SurrealStore};

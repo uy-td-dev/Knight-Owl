@@ -16,17 +16,30 @@ use rig::one_or_many::OneOrMany;
 #[derive(Clone)]
 pub struct MockEngine {
     queue: std::sync::Arc<Mutex<VecDeque<String>>>,
+    /// Usage returned by every streaming response.  `None` means the
+    /// mock provider doesn't report token usage (default).
+    usage: std::sync::Arc<Mutex<Option<Usage>>>,
 }
 
 impl MockEngine {
     /// Create an empty mock engine.
     pub fn new() -> Self {
-        Self { queue: std::sync::Arc::new(Mutex::new(VecDeque::new())) }
+        Self {
+            queue: std::sync::Arc::new(Mutex::new(VecDeque::new())),
+            usage: std::sync::Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Enqueue a scripted response (prompt is not matched; responses are FIFO).
     pub fn on(self, _prompt: &str, response: &str) -> Self {
         self.queue.lock().unwrap().push_back(response.to_owned());
+        self
+    }
+
+    /// Set the per-call token usage every streaming response reports.
+    /// Set once; applies to every subsequent `stream()` invocation.
+    pub fn with_usage(self, usage: Usage) -> Self {
+        *self.usage.lock().unwrap() = Some(usage);
         self
     }
 
@@ -37,6 +50,11 @@ impl MockEngine {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| "mock response".to_owned())
+    }
+
+    /// Snapshot of the configured token usage (cloned).
+    pub fn current_usage(&self) -> Option<Usage> {
+        *self.usage.lock().unwrap()
     }
 }
 
@@ -80,21 +98,33 @@ impl rig::completion::CompletionModel for MockEngine {
         rig::streaming::StreamingCompletionResponse<Self::StreamingResponse>,
         CompletionError,
     > {
-        // Tests using MockEngine never exercise the streaming path; if a test
-        // ever needs it we can switch this to a real channel-backed stream.
-        Err(CompletionError::ProviderError(
-            "MockEngine::stream is not implemented".into(),
-        ))
+        use rig::streaming::{RawStreamingChoice, StreamingCompletionResponse};
+
+        let text  = self.next_response();
+        let usage = self.current_usage();
+        // Yield the whole scripted response as one Message chunk followed by a
+        // FinalResponse marker — matches how real providers signal end-of-turn.
+        let items: Vec<Result<RawStreamingChoice<MockStreamingResponse>, CompletionError>> = vec![
+            Ok(RawStreamingChoice::Message(text)),
+            Ok(RawStreamingChoice::FinalResponse(MockStreamingResponse { usage })),
+        ];
+        let stream = futures_util::stream::iter(items);
+        Ok(StreamingCompletionResponse::stream(Box::pin(stream)))
     }
 }
 
-/// Placeholder streaming-response type for [`MockEngine`].  Required by the
-/// `CompletionModel` contract; never materialized because `stream()` errors.
+/// Streaming-response type for [`MockEngine`].
+///
+/// Carries an optional [`Usage`] so tests can verify Phase F token
+/// capture.  Real providers populate this from the underlying API
+/// response; the mock lets tests inject any value.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MockStreamingResponse;
+pub struct MockStreamingResponse {
+    pub usage: Option<Usage>,
+}
 
 impl Unpin for MockStreamingResponse {}
 
 impl rig::completion::GetTokenUsage for MockStreamingResponse {
-    fn token_usage(&self) -> Option<Usage> { None }
+    fn token_usage(&self) -> Option<Usage> { self.usage }
 }

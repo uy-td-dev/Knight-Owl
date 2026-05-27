@@ -15,8 +15,12 @@ use surrealdb::opt::auth::Root;
 use surrealdb::Surreal;
 use tracing::{debug, info};
 
-use owl_protocol::code::{CodeEdge, CodeEdgeKind, CodeNode, CodeNodeKind, FileNode};
-use owl_protocol::experience::{Insight, InsightKind, TaskMemory, TaskOutcome};
+use owl_protocol::code::{
+    CodeEdge, CodeEdgeKind, CodeNode, CodeNodeKind, FileNode,
+    Severity, StandardKind, StandardNode, Violation,
+};
+use owl_protocol::experience::{Insight, InsightKind, TaskMemory, TaskOutcome, TestRun};
+use owl_protocol::sandbox::ExecutionOutcome;
 use owl_protocol::git::GitCommit;
 use owl_protocol::graph::{Entity, Relation};
 use owl_protocol::vector::{Embedding, VectorDocument, VectorMatch};
@@ -72,6 +76,13 @@ pub struct SurrealStore {
 }
 
 impl SurrealStore {
+    /// Borrow the underlying `Surreal<Any>` handle.
+    ///
+    /// Used by satellite stores in this crate (e.g.
+    /// [`crate::SurrealSchedulerStore`]) that need to share the same
+    /// namespace + db selection without re-connecting.
+    pub fn db(&self) -> &Surreal<Any> { &self.db }
+
     /// Connect, select the namespace/database, and ensure the schema is ready.
     pub async fn connect(cfg: SurrealConfig) -> Result<Self, VaultError> {
         info!(endpoint = %cfg.endpoint, ns = %cfg.namespace, db = %cfg.database, "connecting to surrealdb");
@@ -112,7 +123,14 @@ impl SurrealStore {
              DEFINE TABLE IF NOT EXISTS test_run     SCHEMALESS; \
              \
              DEFINE TABLE IF NOT EXISTS commit SCHEMALESS; \
-             DEFINE TABLE IF NOT EXISTS pr     SCHEMALESS;",
+             DEFINE TABLE IF NOT EXISTS pr     SCHEMALESS; \
+             \
+             DEFINE TABLE IF NOT EXISTS standard_node SCHEMALESS; \
+             DEFINE TABLE IF NOT EXISTS violation     SCHEMALESS; \
+             DEFINE TABLE IF NOT EXISTS violates  SCHEMALESS \
+                 TYPE RELATION FROM code_node TO standard_node; \
+             \
+             DEFINE TABLE IF NOT EXISTS cron_task SCHEMALESS;",
         )
         .await?
         .check()?;
@@ -127,12 +145,50 @@ impl SurrealStore {
                SEARCH ANALYZER code_analyzer BM25; \
              DEFINE INDEX IF NOT EXISTS code_node_file_ft \
                ON code_node FIELDS file_path \
-               SEARCH ANALYZER code_analyzer BM25;",
+               SEARCH ANALYZER code_analyzer BM25; \
+             DEFINE ANALYZER IF NOT EXISTS conv_analyzer \
+               TOKENIZERS blank,class FILTERS lowercase; \
+             DEFINE INDEX IF NOT EXISTS session_memory_content_ft \
+               ON session_memory FIELDS content \
+               SEARCH ANALYZER conv_analyzer BM25;",
         )
         .await
         .ok(); // Non-fatal — kv-mem does not support SEARCH indexes.
 
-        Ok(Self { db })
+        let store = Self { db };
+        // Seed default coding standards from CLAUDE.md (R-22 Review phase).
+        store.seed_default_standards().await?;
+        Ok(store)
+    }
+
+    /// Seed the rules from CLAUDE.md into `standard_node` on every connect.
+    /// UPSERT semantics make this idempotent — re-running with a new rule
+    /// set adds/updates entries without duplicating them.
+    async fn seed_default_standards(&self) -> Result<(), VaultError> {
+        use StandardKind::*;
+        use Severity::*;
+        let defaults = [
+            ("R-1-function-length", "Function ≤ 30 lines", Solid, Block,
+             "R-1 (Single Responsibility): split any function longer than 30 source lines."),
+            ("R-1-single-word-name", "Function name does one thing", Solid, Warn,
+             "R-1: functions with 'and'/'or'/'also' in the name do too many things — split them."),
+            ("R-9-no-unwrap", "No unwrap/expect in library code", Project, Block,
+             "R-9: never call .unwrap() or .expect() in library crates — return Result instead."),
+            ("R-10-doc-pub", "Every pub item has a doc comment", Project, Warn,
+             "R-10: pub fn / pub struct / pub trait require a /// doc comment explaining intent."),
+        ];
+        for (id, name, kind, sev, rule) in defaults {
+            let std = StandardNode {
+                id:        id.into(),
+                name:      name.into(),
+                kind,
+                severity:  sev,
+                rule_text: rule.into(),
+            };
+            // Use HybridStore impl directly to reuse the upsert path.
+            HybridStore::upsert_standard(self, std).await?;
+        }
+        Ok(())
     }
 }
 
@@ -384,6 +440,24 @@ impl HybridStore for SurrealStore {
         Ok(rows.into_iter().filter_map(row_to_code_node).collect())
     }
 
+    async fn code_edges_into(
+        &self,
+        to_id: &str,
+        kind: CodeEdgeKind,
+    ) -> Result<Vec<CodeNode>, VaultError> {
+        let table = edge_table(&kind);
+        let sql = format!(
+            "SELECT meta::id(id) AS id, file_path, name, kind, \
+                    start_line, end_line, preview \
+             FROM (SELECT <-{table}<-code_node AS nodes \
+                   FROM type::record('code_node', $id))[0].nodes.*"
+        );
+        let mut resp =
+            self.db.query(sql).bind(json!({ "id": to_id })).await?.check()?;
+        let rows: Vec<Value> = resp.take(0)?;
+        Ok(rows.into_iter().filter_map(row_to_code_node).collect())
+    }
+
     async fn delete_code_nodes_for_file(&self, path: &str) -> Result<(), VaultError> {
         self.db
             .query("DELETE code_node WHERE file_path = $path")
@@ -553,7 +627,9 @@ impl HybridStore for SurrealStore {
             .query(
                 "UPSERT type::record('task_memory', $id) CONTENT { \
                    id: $id, request: $req, actions: $actions, outcome: $outcome, \
-                   code_refs: $code_refs, session_id: $sid, created: time::now() \
+                   code_refs: $code_refs, session_id: $sid, \
+                   input_tokens: $in_tok, output_tokens: $out_tok, \
+                   created: time::now() \
                  }",
             )
             .bind(json!({
@@ -563,6 +639,8 @@ impl HybridStore for SurrealStore {
                 "outcome":   outcome,
                 "code_refs": code_refs,
                 "sid":       memory.session_id,
+                "in_tok":    memory.input_tokens,
+                "out_tok":   memory.output_tokens,
             }))
             .await?
             .check()?;
@@ -613,7 +691,7 @@ impl HybridStore for SurrealStore {
             .db
             .query(
                 "SELECT meta::id(id) AS id, request, actions, outcome, \
-                        code_refs, session_id, created \
+                        code_refs, session_id, input_tokens, output_tokens, created \
                  FROM task_memory \
                  ORDER BY created DESC \
                  LIMIT $k",
@@ -623,6 +701,137 @@ impl HybridStore for SurrealStore {
             .check()?;
         let rows: Vec<Value> = resp.take(0)?;
         Ok(rows.into_iter().filter_map(row_to_task_memory).collect())
+    }
+
+    async fn store_test_run(&self, run: TestRun) -> Result<(), VaultError> {
+        let code_refs = serde_json::to_value(&run.code_refs)?;
+        let outcome = serde_json::to_value(&run.outcome)?;
+        self.db
+            .query(
+                "UPSERT type::record('test_run', $id) CONTENT { \
+                   id: $id, task_id: $task_id, code_refs: $code_refs, \
+                   outcome: $outcome, created_at: $created_at \
+                 }",
+            )
+            .bind(json!({
+                "id":         run.id,
+                "task_id":    run.task_id,
+                "code_refs":  code_refs,
+                "outcome":    outcome,
+                "created_at": run.created_at,
+            }))
+            .await?
+            .check()?;
+        Ok(())
+    }
+
+    async fn test_runs_for_task(&self, task_id: &str) -> Result<Vec<TestRun>, VaultError> {
+        let mut resp = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS id, task_id, code_refs, outcome, created_at \
+                 FROM test_run \
+                 WHERE task_id = $tid \
+                 ORDER BY created_at DESC",
+            )
+            .bind(json!({ "tid": task_id }))
+            .await?
+            .check()?;
+        let rows: Vec<Value> = resp.take(0)?;
+        Ok(rows.into_iter().filter_map(row_to_test_run).collect())
+    }
+
+    // ── R-22 standards + violations ────────────────────────────────────────
+
+    async fn upsert_standard(&self, std: StandardNode) -> Result<(), VaultError> {
+        let kind = serde_json::to_value(&std.kind)?;
+        let sev  = serde_json::to_value(&std.severity)?;
+        self.db
+            .query(
+                "UPSERT type::record('standard_node', $id) CONTENT { \
+                   id: $id, name: $name, kind: $kind, severity: $sev, \
+                   rule_text: $rule \
+                 }",
+            )
+            .bind(json!({
+                "id":   std.id,
+                "name": std.name,
+                "kind": kind,
+                "sev":  sev,
+                "rule": std.rule_text,
+            }))
+            .await?
+            .check()?;
+        Ok(())
+    }
+
+    async fn list_standards(&self) -> Result<Vec<StandardNode>, VaultError> {
+        let mut resp = self.db
+            .query(
+                "SELECT meta::id(id) AS id, name, kind, severity, rule_text \
+                 FROM standard_node ORDER BY id",
+            )
+            .await?
+            .check()?;
+        let rows: Vec<Value> = resp.take(0)?;
+        Ok(rows.into_iter().filter_map(row_to_standard).collect())
+    }
+
+    async fn record_violation(&self, v: Violation) -> Result<(), VaultError> {
+        let sev = serde_json::to_value(&v.severity)?;
+        // Persist the violation row.
+        self.db
+            .query(
+                "UPSERT type::record('violation', $id) CONTENT { \
+                   id: $id, code_node_id: $cn, standard_id: $sid, \
+                   task_id: $tid, evidence: $ev, severity: $sev, \
+                   created_at: $ts \
+                 }",
+            )
+            .bind(json!({
+                "id":  v.id,
+                "cn":  v.code_node_id,
+                "sid": v.standard_id,
+                "tid": v.task_id,
+                "ev":  v.evidence,
+                "sev": sev,
+                "ts":  v.created_at,
+            }))
+            .await?
+            .check()?;
+        // Best-effort RELATE — skip if endpoint records don't exist (mem-only
+        // tests construct violations without seeding the standard/code rows).
+        let _ = self.db
+            .query(
+                "RELATE type::record('code_node', $cn)->violates->\
+                 type::record('standard_node', $sid) \
+                 SET task_id = $tid, evidence = $ev, severity = $sev"
+            )
+            .bind(json!({
+                "cn": v.code_node_id, "sid": v.standard_id,
+                "tid": v.task_id, "ev": v.evidence, "sev": sev,
+            }))
+            .await;
+        Ok(())
+    }
+
+    async fn violations_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<Violation>, VaultError> {
+        let mut resp = self.db
+            .query(
+                "SELECT meta::id(id) AS id, code_node_id, standard_id, \
+                        task_id, evidence, severity, created_at \
+                 FROM violation \
+                 WHERE task_id = $tid \
+                 ORDER BY created_at DESC",
+            )
+            .bind(json!({ "tid": task_id }))
+            .await?
+            .check()?;
+        let rows: Vec<Value> = resp.take(0)?;
+        Ok(rows.into_iter().filter_map(row_to_violation).collect())
     }
 
     async fn clear_insights(&self) -> Result<u64, VaultError> {
@@ -834,14 +1043,16 @@ fn edge_table(kind: &CodeEdgeKind) -> &'static str {
         CodeEdgeKind::References => "references",
         CodeEdgeKind::Implements => "implements",
         CodeEdgeKind::Overrides  => "overrides",
+        CodeEdgeKind::Violates   => "violates",
     }
 }
 
 /// Map `CodeEdgeKind` to (source_table, target_table) for RELATE.
 fn edge_endpoints(kind: &CodeEdgeKind) -> (&'static str, &'static str) {
     match kind {
-        CodeEdgeKind::Defines => ("file", "code_node"),
-        _                     => ("code_node", "code_node"),
+        CodeEdgeKind::Defines  => ("file", "code_node"),
+        CodeEdgeKind::Violates => ("code_node", "standard_node"),
+        _                      => ("code_node", "code_node"),
     }
 }
 
@@ -880,12 +1091,56 @@ fn row_to_task_memory(v: Value) -> Option<TaskMemory> {
     let code_refs: Vec<String> =
         serde_json::from_value(obj.get("code_refs")?.clone()).unwrap_or_default();
     Some(TaskMemory {
-        id:         obj.get("id")?.as_str()?.to_string(),
-        request:    obj.get("request").and_then(Value::as_str).unwrap_or_default().to_string(),
+        id:            obj.get("id")?.as_str()?.to_string(),
+        request:       obj.get("request").and_then(Value::as_str).unwrap_or_default().to_string(),
         actions,
         outcome,
         code_refs,
-        session_id: obj.get("session_id").and_then(Value::as_str).unwrap_or_default().to_string(),
+        session_id:    obj.get("session_id").and_then(Value::as_str).unwrap_or_default().to_string(),
+        input_tokens:  obj.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
+        output_tokens: obj.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
+    })
+}
+
+fn row_to_standard(v: Value) -> Option<StandardNode> {
+    let obj  = v.as_object()?;
+    let kind: StandardKind = serde_json::from_value(obj.get("kind")?.clone()).ok()?;
+    let sev:  Severity     = serde_json::from_value(obj.get("severity")?.clone()).ok()?;
+    Some(StandardNode {
+        id:        obj.get("id")?.as_str()?.to_string(),
+        name:      obj.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+        kind,
+        severity:  sev,
+        rule_text: obj.get("rule_text").and_then(Value::as_str).unwrap_or_default().to_string(),
+    })
+}
+
+fn row_to_violation(v: Value) -> Option<Violation> {
+    let obj = v.as_object()?;
+    let sev: Severity = serde_json::from_value(obj.get("severity")?.clone()).ok()?;
+    Some(Violation {
+        id:           obj.get("id")?.as_str()?.to_string(),
+        code_node_id: obj.get("code_node_id").and_then(Value::as_str).unwrap_or_default().to_string(),
+        standard_id:  obj.get("standard_id").and_then(Value::as_str).unwrap_or_default().to_string(),
+        task_id:      obj.get("task_id").and_then(Value::as_str).unwrap_or_default().to_string(),
+        evidence:     obj.get("evidence").and_then(Value::as_str).unwrap_or_default().to_string(),
+        severity:     sev,
+        created_at:   obj.get("created_at").and_then(Value::as_i64).unwrap_or(0),
+    })
+}
+
+fn row_to_test_run(v: Value) -> Option<TestRun> {
+    let obj = v.as_object()?;
+    let outcome: ExecutionOutcome =
+        serde_json::from_value(obj.get("outcome")?.clone()).ok()?;
+    let code_refs: Vec<String> =
+        serde_json::from_value(obj.get("code_refs")?.clone()).unwrap_or_default();
+    Some(TestRun {
+        id:         obj.get("id")?.as_str()?.to_string(),
+        task_id:    obj.get("task_id").and_then(Value::as_str).unwrap_or_default().to_string(),
+        code_refs,
+        outcome,
+        created_at: obj.get("created_at").and_then(Value::as_i64).unwrap_or(0),
     })
 }
 
